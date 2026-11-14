@@ -1,0 +1,14 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  annotations:
+    deployed-at: "2026-11-13T09:00:00Z"
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: web
+          image: web:1.1
+          ports: [80, 443]

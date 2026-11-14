@@ -1,0 +1,2 @@
+let total = price * qty;
+fn main() {}

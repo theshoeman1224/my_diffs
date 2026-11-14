@@ -1,0 +1,44 @@
+# Configuration
+
+`.mydiff.toml` in the working directory is loaded automatically.
+
+```console
+$ mydiff config paths
+? success
+not found  /nonexistent/mydiff-tests/mydiff/config.toml
+   loaded  .mydiff.toml
+
+$ mydiff config show
+? success
+whitespace = "trailing"
+ignore_case = false
+ignore_blank_lines = false
+ignore_line_endings = true
+ignore = []
+only = []
+mask = []
+context = 3
+modify_threshold = 0.5
+algorithm = "myers"
+include = []
+exclude = []
+key_columns = []
+ignore_paths = []
+
+```
+
+Profiles add to the defaults; CLI flags override both.
+
+```console
+$ mydiff -f summary run1.log run2.log
+? 1
+run1.log vs run2.log: 0 removed, 0 added, 2 modified (0 equal)
+
+$ mydiff -f summary --profile logs run1.log run2.log
+run1.log vs run2.log: identical (1 equal, 2 ignored)
+
+$ mydiff -f summary --no-config --profile logs run1.log run2.log
+? 2
+mydiff: error: invalid configuration: profile `logs` not found (known: none)
+
+```

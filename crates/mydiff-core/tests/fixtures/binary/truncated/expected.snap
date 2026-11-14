@@ -1,0 +1,6 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+---
+00000020 - 61 [61] [61] [61] [61] [61] [61] [61] [00]
+00000020 + 61 [00] [..] [..] [..] [..] [..] [..] [..]
+-- sizes 41 vs 34, 8 differing byte(s), first at 0x21

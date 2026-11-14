@@ -1,0 +1,7 @@
+{
+  "name": "service",
+  "version": "1.4.0",
+  "features": ["auth", "billing"],
+  "limits": {"rps": 100, "burst": 20},
+  "deprecated_flag": true
+}

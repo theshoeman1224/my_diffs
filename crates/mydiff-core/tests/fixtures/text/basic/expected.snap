@@ -1,0 +1,12 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+assertion_line: 42
+---
+   1    1   alpha
+   2      - beta
+   3    2   gamma
+   4      ~ delta
+        3 ~ delta{+ changed+}
+        4 + zeta
+   5    5   epsilon
+-- equal=3 removed=1 added=1 modified=1 ignored=0

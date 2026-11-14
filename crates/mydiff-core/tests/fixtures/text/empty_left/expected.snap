@@ -1,0 +1,6 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+---
+        1 + new file
+        2 + contents
+-- equal=0 removed=0 added=2 modified=0 ignored=0

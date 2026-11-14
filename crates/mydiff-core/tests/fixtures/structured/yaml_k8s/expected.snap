@@ -1,0 +1,7 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+---
+~ $.spec.replicas: 2 → 3
+~ $.spec.template.spec.containers[0].image: "web:1.0" → "web:1.1"
++ $.spec.template.spec.containers[0].ports[1]: 443
+-- added=1 removed=0 changed=2

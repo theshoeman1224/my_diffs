@@ -1,0 +1,10 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+---
+   1      . # generated 2024-01-01
+        1 . # generated 2026-11-13
+   2    2   value = 1
+   3      . # note
+   4      ~ other = [-2-]
+        3 ~ other = {+3+}
+-- equal=1 removed=0 added=0 modified=1 ignored=3

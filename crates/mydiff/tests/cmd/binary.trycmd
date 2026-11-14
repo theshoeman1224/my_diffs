@@ -1,0 +1,20 @@
+# Binary files
+
+Files with binary content get a hex comparison.
+
+```console
+$ mydiff a.bin b.bin
+? 1
+--- a.bin
++++ b.bin
+@@ 0x00000000 @@
+-00000000  50 4e 47 00 01 02 68 65  6c 6c 6f 20 77 6f 72 6c  |PNG...hello worl|
++00000000  50 4e 47 00 01 02 68 65  6c 6c 6f 5f 77 6f 72 6c  |PNG...hello_worl|
+
+$ mydiff -f summary a.bin b.bin
+? 1
+a.bin vs b.bin: binary, 1 differing byte(s), first at 0xb (sizes 19 vs 19)
+
+$ mydiff a.bin a.bin
+
+```

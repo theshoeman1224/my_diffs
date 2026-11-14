@@ -1,0 +1,88 @@
+# Folder comparison
+
+Two directories switch to folder mode automatically. Unified output is like
+`diff -r`: a patch per changed text file plus a note per other difference.
+
+```console
+$ mydiff left right
+? 1
+Only in right: added.txt
+--- left/changed.txt
++++ right/changed.txt
+@@ -1,1 +1,1 @@
+-v1
++v2
+Only in right: docs
+left/kind and right/kind are a file and a directory
+Only in left: removed.txt
+Only in left: src/old
+
+```
+
+Summary lists only differences (`-` left only, `+` right only, `~` changed,
+`!` file vs directory), then totals.
+
+```console
+$ mydiff -f summary left right
+? 1
++ added.txt
+~ changed.txt
++ docs/
+! kind
+- removed.txt
+- src/old/
+left vs right: 1 different, 2 only in left, 2 only in right, 1 file/dir mismatch (2 same)
+
+```
+
+Include/exclude globs; patterns without `/` match at any depth.
+
+```console
+$ mydiff -f summary --exclude '*.txt' --exclude docs --exclude kind left right
+? 1
+- src/old/
+left vs right: 1 only in left (1 same)
+
+```
+
+Text rules apply to files inside folders too.
+
+```console
+$ mydiff -f summary ws_l ws_r
+? 1
+~ a.c
+ws_l vs ws_r: 1 different (0 same)
+
+$ mydiff -f summary -b ws_l ws_r
+ws_l vs ws_r: identical (1 same)
+
+```
+
+JSON for scripts.
+
+```console
+$ mydiff -f json --include 'changed.txt' left right
+? 1
+{
+  "mode": "folder",
+  "left": "left",
+  "right": "right",
+  "identical": false,
+  "stats": {
+    "same": 0,
+    "different": 1,
+    "only_left": 0,
+    "only_right": 0,
+    "type_mismatch": 0,
+    "errors": 0
+  },
+  "entries": [
+    {
+      "path": "changed.txt",
+      "is_dir": false,
+      "status": "different"
+    }
+  ]
+}
+
+```

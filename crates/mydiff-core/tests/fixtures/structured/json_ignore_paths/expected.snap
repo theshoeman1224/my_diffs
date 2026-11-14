@@ -1,0 +1,5 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+---
+~ $.items[1].v: 2 → 3
+-- added=0 removed=0 changed=1

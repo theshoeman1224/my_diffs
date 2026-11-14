@@ -1,0 +1,146 @@
+# Text comparison
+
+Unified output (the default when stdout is not a terminal). Exit status 1 means
+"differences found".
+
+```console
+$ mydiff a.txt b.txt
+? 1
+--- a.txt
++++ b.txt
+@@ -1,5 +1,5 @@
+ alpha
+-beta
+ gamma
+-delta
++delta changed
++zeta
+ epsilon
+
+```
+
+Identical inputs print nothing and exit 0.
+
+```console
+$ mydiff a.txt a.txt
+
+```
+
+Side-by-side, summary and quiet modes.
+
+```console
+$ mydiff --format side-by-side a.txt b.txt
+? 1
+     a.txt                                    b.txt
+   1 alpha                                  1 alpha
+   2 beta                              -
+   3 gamma                                  2 gamma
+   4 delta                             ~    3 delta changed
+                                       +    4 zeta
+   5 epsilon                                5 epsilon
+
+$ mydiff -f summary a.txt b.txt
+? 1
+a.txt vs b.txt: 1 removed, 1 added, 1 modified (3 equal)
+
+$ mydiff -q a.txt b.txt
+? 1
+
+```
+
+Whitespace knobs: exact (default), trailing, all.
+
+```console
+$ mydiff -f summary ws1.c ws2.c
+? 1
+ws1.c vs ws2.c: 0 removed, 0 added, 2 modified (1 equal)
+
+$ mydiff -f summary -Z ws1.c ws2.c
+? 1
+ws1.c vs ws2.c: 0 removed, 0 added, 1 modified (2 equal)
+
+$ mydiff -w ws1.c ws2.c
+
+```
+
+Whitelist + mask: only compare ERROR lines, with timestamps masked.
+
+```console
+$ mydiff --only ' ERROR ' --mask '^\S+ \S+=>T' run1.log run2.log
+
+```
+
+Comparing a file with a directory uses the same file name inside it.
+
+```console
+$ mydiff -f summary a.txt dir
+? 1
+a.txt vs dir/a.txt: 1 removed, 1 added, 1 modified (3 equal)
+
+```
+
+JSON output for scripts.
+
+```console
+$ mydiff -f json -Z ws1.c ws2.c
+? 1
+{
+  "mode": "text",
+  "left": "ws1.c",
+  "right": "ws2.c",
+  "identical": false,
+  "stats": {
+    "equal": 2,
+    "removed": 0,
+    "added": 0,
+    "modified": 1,
+    "ignored": 0
+  },
+  "rows": [
+    {
+      "kind": "modified",
+      "left": {
+        "number": 1,
+        "text": "if (x) {",
+        "changed": [
+          {
+            "start": 2,
+            "end": 3
+          },
+          {
+            "start": 6,
+            "end": 7
+          }
+        ]
+      },
+      "right": {
+        "number": 1,
+        "text": "if(x){"
+      }
+    },
+    {
+      "kind": "equal",
+      "left": {
+        "number": 2,
+        "text": "  y();  "
+      },
+      "right": {
+        "number": 2,
+        "text": "  y();"
+      }
+    },
+    {
+      "kind": "equal",
+      "left": {
+        "number": 3,
+        "text": "}"
+      },
+      "right": {
+        "number": 3,
+        "text": "}"
+      }
+    }
+  ]
+}
+
+```
