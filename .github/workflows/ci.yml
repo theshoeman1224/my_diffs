@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Makes insta fail (never write .snap.new) on snapshot mismatch.
+  CI: "true"
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1 # honors rust-toolchain.toml
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest,cargo-insta,cargo-llvm-cov,cargo-deny
+      - run: just fmt-check
+      - run: just lint
+      - run: just test
+      - run: just snap-check
+      - run: just cov
+      - run: just deny

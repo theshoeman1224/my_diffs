@@ -1,0 +1,12 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+---
++ added.txt
+~ changed.txt
++ docs/
+! kind
+- removed.txt
+  same.txt
+  src/lib.rs
+- src/old/
+-- same=2 different=1 only_left=2 only_right=2 type_mismatch=1 errors=0

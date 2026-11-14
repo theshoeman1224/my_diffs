@@ -1,0 +1,6 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+---
+  a.c
+  b.log
+-- same=2 different=0 only_left=0 only_right=0 type_mismatch=0 errors=0

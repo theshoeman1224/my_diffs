@@ -1,0 +1,4 @@
+INFO start v2
+ERROR disk full
+INFO tock
+WARN very slow

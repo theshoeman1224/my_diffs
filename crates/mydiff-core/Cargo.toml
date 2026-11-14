@@ -1,0 +1,35 @@
+[package]
+name = "mydiff-core"
+description = "Pure diff engine for mydiff: text, folder, binary and structured comparison."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+similar.workspace = true
+regex.workspace = true
+globset.workspace = true
+walkdir.workspace = true
+content_inspector.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_norway.workspace = true
+toml.workspace = true
+csv.workspace = true
+thiserror.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+insta.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+datatest-stable.workspace = true
+
+[[test]]
+name = "fixtures"
+harness = false
+
+[lints]
+workspace = true

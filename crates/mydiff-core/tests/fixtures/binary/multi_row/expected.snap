@@ -1,0 +1,8 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+---
+00000000 - 00 01 02 [03] 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+00000000 + 00 01 02 [aa] 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+00000020 - 20 21 22 23 24 25 26 27 [28] [29] 2a 2b 2c 2d 2e 2f
+00000020 + 20 21 22 23 24 25 26 27 [bb] [cc] 2a 2b 2c 2d 2e 2f
+-- sizes 64 vs 64, 3 differing byte(s), first at 0x3

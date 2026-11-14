@@ -1,0 +1,8 @@
+[defaults]
+whitespace = "trailing"
+
+[profile.logs]
+only = [' ERROR ']
+[[profile.logs.mask]]
+pattern = '^\S+ \S+'
+replace = "<TIME>"

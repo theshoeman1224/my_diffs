@@ -1,0 +1,33 @@
+[package]
+name = "mydiff"
+description = "Compare files, folders, binary and structured data."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mydiff"
+path = "src/main.rs"
+
+[dependencies]
+mydiff-core.workspace = true
+mydiff-tui.workspace = true
+clap.workspace = true
+anstream.workspace = true
+anstyle.workspace = true
+anyhow.workspace = true
+etcetera.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+crossterm.workspace = true
+
+[dev-dependencies]
+trycmd.workspace = true
+insta.workspace = true
+rstest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

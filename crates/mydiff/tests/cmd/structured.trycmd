@@ -1,0 +1,54 @@
+# Structured data (JSON / YAML / CSV)
+
+Chosen automatically when both files share a structured extension. Changes are
+reported by path; object key order never matters.
+
+```console
+$ mydiff a.json b.json
+? 1
+--- a.json
++++ b.json
+~ $.version: "1.4.0" → "1.5.0"
++ $.features[1]: "sso"
+~ $.limits.rps: 100 → 150
+- $.deprecated_flag: true
+
+$ mydiff -f summary a.yaml b.yaml
+? 1
+a.yaml vs b.yaml: yaml, 1 added, 0 removed, 3 changed
+
+$ mydiff -f summary --ignore-path '$.metadata.annotations' --ignore-path '$.spec' a.yaml b.yaml
+a.yaml vs b.yaml: identical yaml
+
+```
+
+CSV rows can be matched by key columns instead of position.
+
+```console
+$ mydiff --key-column sku a.csv b.csv
+? 1
+--- a.csv
++++ b.csv
+~ $["sku=A1"].qty: "10" → "12"
+- $["sku=B2"]: {"sku":"B2","name":"Gadget","qty":"5"}
++ $["sku=D4"]: {"sku":"D4","name":"Thing","qty":"1"}
+
+```
+
+`--mode text` forces a plain line diff.
+
+```console
+$ mydiff --mode text -f summary a.json b.json
+? 1
+a.json vs b.json: 2 removed, 1 added, 2 modified (3 equal)
+
+```
+
+Parse errors name the side and format.
+
+```console
+$ mydiff a.json bad.json
+? 2
+mydiff: error: could not parse right input as json: EOF while parsing a value at line 2 column 0
+
+```

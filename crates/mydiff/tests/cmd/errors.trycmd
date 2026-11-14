@@ -1,0 +1,36 @@
+# Errors exit with status 2
+
+```console
+$ mydiff missing.txt other.txt
+? 2
+mydiff: error: reading missing.txt: No such file or directory (os error 2)
+
+$ mydiff only-one.txt
+? 2
+mydiff: error: two inputs are required: mydiff [OPTIONS] <LEFT> <RIGHT> (see --help)
+
+$ mydiff --ignore '(' missing.txt other.txt
+? 2
+mydiff: error: invalid ignore pattern `(`: regex parse error:
+    (
+    ^
+error: unclosed group: regex parse error:
+    (
+    ^
+error: unclosed group
+
+$ mydiff -w -b a b
+? 2
+error: the argument '--ignore-all-space' cannot be used with '--ignore-space-change'
+
+Usage: mydiff --ignore-all-space <LEFT> <RIGHT>
+
+For more information, try '--help'.
+
+$ mydiff --mask nonsense a b
+? 2
+error: invalid value 'nonsense' for '--mask <REGEX=>REPL>': expected 'REGEX=>REPLACEMENT', got 'nonsense'
+
+For more information, try '--help'.
+
+```

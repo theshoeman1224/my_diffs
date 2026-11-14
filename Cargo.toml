@@ -1,0 +1,65 @@
+[workspace]
+resolver = "3"
+members = ["crates/mydiff-core", "crates/mydiff-tui", "crates/mydiff"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/theshoeman1224/my_diffs"
+
+[workspace.dependencies]
+mydiff-core = { path = "crates/mydiff-core" }
+mydiff-tui = { path = "crates/mydiff-tui" }
+
+similar = { version = "3.2", features = ["inline", "unicode"] }
+regex = "1.13"
+globset = "0.4"
+walkdir = "2.5"
+content_inspector = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_norway = "0.9"
+toml = "1.2"
+csv = "1.4"
+thiserror = "2.0"
+anyhow = "1.0"
+etcetera = "0.11"
+clap = { version = "4.6", features = ["derive"] }
+anstream = "1.0"
+anstyle = "1.0"
+ratatui = "0.30"
+crossterm = "0.29"
+unicode-width = "0.2"
+
+# test-only
+rstest = "0.28"
+insta = { version = "1.49", features = ["glob", "yaml", "json"] }
+proptest = "1.12"
+trycmd = "1.2"
+tempfile = "3.27"
+datatest-stable = "0.3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+similar_names = "allow"
+many_single_char_names = "allow"
+single_range_in_vec_init = "allow"
+format_push_string = "allow"
+format_collect = "allow"
+
+[profile.dev.package]
+insta.opt-level = 3
+similar.opt-level = 3

@@ -1,0 +1,11 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+---
+   1      . INFO start
+        1 . INFO start v2
+   2    2   ERROR disk full
+   3      . INFO tick
+        3 . INFO tock
+   4      ~ WARN slow
+        4 ~ WARN {+very +}slow
+-- equal=1 removed=0 added=0 modified=1 ignored=4

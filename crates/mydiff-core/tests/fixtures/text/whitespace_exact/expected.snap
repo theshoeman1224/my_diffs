@@ -1,0 +1,9 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+---
+   1      ~ if[- -](a)[- -]{
+        1 ~ if(a){
+   2      ~   b();[-   -]
+        2 ~   b();
+   3    3   }
+-- equal=1 removed=0 added=0 modified=2 ignored=0

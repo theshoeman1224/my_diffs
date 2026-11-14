@@ -1,0 +1,7 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+---
+   1      ~ let total = price * [-qty-];
+        1 ~ let total = price * {+quantity + tax+};
+   2    2   fn main() {}
+-- equal=1 removed=0 added=0 modified=1 ignored=0

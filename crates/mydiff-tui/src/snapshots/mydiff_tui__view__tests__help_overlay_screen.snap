@@ -1,0 +1,28 @@
+---
+source: crates/mydiff-tui/src/view.rs
+expression: screen(&a)
+---
+" lef┌ keys ────────────────────────────────────────────────────────────────┐    "
+"   1│j / ↓ / wheel          scroll down                                    │    "
+"   2│k / ↑ / wheel          scroll up                                      │    "
+"   3│PgDn / Space / Ctrl-d  page down                                      │    "
+"   4│PgUp / Ctrl-u          page up                                        │    "
+"    │g / Home               top                                            │    "
+"   5│G / End                bottom                                         │    "
+"    │n                      next change                                    │    "
+"    │p / N                  previous change                                │    "
+"    │h / ←   l / →          scroll left / right                            │    "
+"    │w                      cycle whitespace (exact/trailing/change/all)   │    "
+"    │i                      toggle ignore case                             │    "
+"    │b                      toggle ignore blank lines                      │    "
+"    │e                      toggle ignore line endings (CRLF/LF)           │    "
+"    │u                      toggle side-by-side / inline layout            │    "
+"    │Enter                  folder view: open file diff (Esc/q returns)    │    "
+"    │s                      folder view: show/hide identical files         │    "
+"    │?                      toggle this help                               │    "
+"    │q / Esc                quit or go back (Esc closes help first)        │    "
+"    │Ctrl-c                 quit from anywhere                             │    "
+"    │                                                                      │    "
+"    │ removed  added  modified changed text ignored                        │    "
+"    └──────────────────────────────────────────────────────────────────────┘    "
+" [w]s:exact [i]case:off [b]lank:off [e]ol:i… -1 +1 ~1  2 changes  ?:help q:quit "

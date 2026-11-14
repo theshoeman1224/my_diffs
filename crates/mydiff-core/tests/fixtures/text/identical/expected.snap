@@ -1,0 +1,6 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+---
+   1    1   same
+   2    2   text
+-- equal=2 removed=0 added=0 modified=0 ignored=0

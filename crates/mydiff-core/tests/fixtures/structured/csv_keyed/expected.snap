@@ -1,0 +1,7 @@
+---
+source: crates/mydiff-core/tests/fixtures.rs
+---
+~ $["sku=A1"].qty: "10" → "12"
+- $["sku=B2"]: {"sku":"B2","name":"Gadget","qty":"5"}
++ $["sku=D4"]: {"sku":"D4","name":"Thing","qty":"1"}
+-- added=1 removed=1 changed=1

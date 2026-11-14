@@ -1,0 +1,6 @@
+{
+  "version": "1.5.0",
+  "name": "service",
+  "features": ["auth", "sso", "billing"],
+  "limits": {"rps": 150, "burst": 20.0}
+}

@@ -1,0 +1,13 @@
+---
+source: crates/mydiff-tui/src/view.rs
+expression: "screen(&app(LEFT, RIGHT, 60, 9))"
+---
+" left.txt                       right.txt                   "
+"   1 alpha                        1 alpha                   "
+"   2 beta                    -                              "
+"   3 gamma                        2 gamma                   "
+"   4 delta                   ~    3 delta changed           "
+"                             +    4 zeta                    "
+"   5 epsilon                      5 epsilon                 "
+"                                                            "
+" [w]s:exact [i]case:off… -1 +1 ~1  2 changes  ?:help q:quit "
