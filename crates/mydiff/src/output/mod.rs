@@ -1,6 +1,7 @@
 //! Non-interactive renderers. Each takes a core result model and writes text.
 //! Colors are optional so the same code produces plain text for tests and pipes.
 
+pub mod ai;
 pub mod folder;
 pub mod hex;
 pub mod json;

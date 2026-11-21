@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use mydiff_core::detect::looks_binary;
-use mydiff_core::folder::{EntryStatus, FolderDiff, diff_folders};
+use mydiff_core::folder::{EntryStatus, FolderDiff, FolderEntry, Roots, diff_roots};
 use mydiff_core::{DiffOptions, Result, RowKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
@@ -78,6 +78,8 @@ pub struct FolderSession {
     pub left_label: String,
     pub right_label: String,
     pub options: DiffOptions,
+    /// Whole trees, or the changed files of a git commit or diff.
+    pub roots: Roots,
 }
 
 impl FolderSession {
@@ -89,7 +91,17 @@ impl FolderSession {
             left_root,
             right_root,
             options,
+            roots: Roots::Trees,
         }
+    }
+
+    fn compare(&self) -> Result<FolderDiff> {
+        diff_roots(
+            &self.left_root,
+            &self.right_root,
+            &self.roots,
+            &self.options,
+        )
     }
 
     /// Display label of `rel` under the left or right root.
@@ -132,7 +144,7 @@ pub const MIN_LIST_COLS: u16 = 50;
 
 impl FolderApp {
     pub fn new(session: FolderSession) -> Result<Self> {
-        let diff = diff_folders(&session.left_root, &session.right_root, &session.options)?;
+        let diff = session.compare()?;
         let mut app = Self {
             session,
             diff,
@@ -315,9 +327,7 @@ impl FolderApp {
     }
 
     fn is_change(&self, visible_idx: usize) -> bool {
-        self.diff.entries[self.visible[visible_idx]]
-            .status
-            .is_change()
+        self.diff.entries[self.visible[visible_idx]].is_change()
     }
 
     fn selected_path(&self) -> Option<String> {
@@ -341,7 +351,7 @@ impl FolderApp {
 
     fn rebuild_visible(&mut self, keep: Option<String>) {
         self.visible = (0..self.diff.entries.len())
-            .filter(|&i| self.show_same || self.diff.entries[i].status.is_change())
+            .filter(|&i| self.show_same || self.diff.entries[i].is_change())
             .collect();
         let pos = keep.and_then(|p| {
             self.visible
@@ -354,8 +364,7 @@ impl FolderApp {
 
     /// Re-run the folder comparison after an option toggle.
     fn refresh(&mut self) {
-        let s = &self.session;
-        match diff_folders(&s.left_root, &s.right_root, &s.options) {
+        match self.session.compare() {
             Ok(d) => {
                 let path = self.selected_path();
                 self.diff = d;
@@ -381,19 +390,21 @@ impl FolderApp {
             ));
             return;
         }
-        let read = |root: &PathBuf, present: bool| -> std::io::Result<Vec<u8>> {
+        let read = |root: &PathBuf, rel: &str, present: bool| -> std::io::Result<Vec<u8>> {
             if present {
-                std::fs::read(root.join(&entry.path))
+                std::fs::read(root.join(rel))
             } else {
                 Ok(Vec::new())
             }
         };
         let left = read(
             &self.session.left_root,
+            entry.left_path(),
             entry.status != EntryStatus::OnlyRight,
         );
         let right = read(
             &self.session.right_root,
+            &entry.path,
             entry.status != EntryStatus::OnlyLeft,
         );
         let (left, right) = match (left, right) {
@@ -411,7 +422,7 @@ impl FolderApp {
         };
         if looks_binary(&left) || looks_binary(&right) {
             let mut child = HexApp::new(HexSession {
-                left_label: self.session.label(false, &entry.path),
+                left_label: self.session.label(false, entry.left_path()),
                 right_label: self.session.label(true, &entry.path),
                 diff: mydiff_core::binary::diff_bytes(left, right),
             });
@@ -421,7 +432,7 @@ impl FolderApp {
             return;
         }
         let session = TextSession {
-            left_label: self.session.label(false, &entry.path),
+            left_label: self.session.label(false, entry.left_path()),
             right_label: self.session.label(true, &entry.path),
             left: String::from_utf8_lossy(&left).into_owned(),
             right: String::from_utf8_lossy(&right).into_owned(),
@@ -438,8 +449,9 @@ impl FolderApp {
     }
 }
 
-fn status_style(s: &EntryStatus) -> Style {
-    match s {
+fn entry_style(e: &FolderEntry) -> Style {
+    match &e.status {
+        EntryStatus::Same if e.renamed_from.is_some() => Style::new().fg(Color::Cyan),
         EntryStatus::Same => view::row_style(RowKind::Equal),
         EntryStatus::Different => view::row_style(RowKind::Modified),
         EntryStatus::OnlyLeft => view::row_style(RowKind::Removed),
@@ -497,12 +509,11 @@ fn render_list(app: &FolderApp, frame: &mut Frame, area: Rect) {
             .take(usize::from(area.height))
             .map(|(vi, &ei)| {
                 let e = &app.diff.entries[ei];
-                let slash = if e.is_dir { "/" } else { "" };
-                let mut text = format!(" {} {}{slash}", e.status.marker(), e.path);
+                let mut text = format!(" {} {}", e.marker(), e.display_path());
                 if let EntryStatus::Error(msg) = &e.status {
                     text.push_str(&format!("  ({msg})"));
                 }
-                let mut style = status_style(&e.status);
+                let mut style = entry_style(e);
                 if vi == app.selected {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
@@ -528,8 +539,13 @@ fn render_status(app: &FolderApp, frame: &mut Frame, area: Rect) {
             if o.ignore_case { "on" } else { "off" },
         )
     });
+    let renamed = if s.renamed > 0 {
+        format!(" >{}", s.renamed)
+    } else {
+        String::new()
+    };
     let right = format!(
-        "~{} -{} +{} ={}  enter:open F1:keys :help q:quit ",
+        "~{} -{} +{} ={}{renamed}  enter:open F1:keys :help q:quit ",
         s.different,
         s.only_left,
         s.only_right + s.type_mismatch + s.errors,
@@ -857,5 +873,89 @@ mod tests {
             f.app.message.as_deref(),
             Some("E492: Not an editor command: x")
         );
+    }
+
+    /// A git-style changed-files session: two renames (one edited), a new
+    /// file deep in a new directory, and an edit.
+    fn changeset() -> Fixture {
+        use mydiff_core::folder::Rename;
+        let l = tempfile::tempdir().unwrap();
+        let r = tempfile::tempdir().unwrap();
+        write(l.path(), "src/lib.rs", b"fn a() {}\n");
+        write(r.path(), "src/lib.rs", b"fn b() {}\n");
+        write(r.path(), "docs/guide/intro.md", b"# hi\n");
+        write(l.path(), "util.rs", b"one\ntwo\n");
+        write(r.path(), "src/util.rs", b"one\n2\n");
+        write(l.path(), "LICENSE", b"mit\n");
+        write(r.path(), "COPYING", b"mit\n");
+        let rename = |from: &str, to: &str| Rename {
+            from: from.into(),
+            to: to.into(),
+        };
+        let mut session = FolderSession::new(
+            l.path().to_path_buf(),
+            r.path().to_path_buf(),
+            DiffOptions::default(),
+        );
+        session.left_label = "HEAD^".into();
+        session.right_label = "HEAD".into();
+        session.roots = Roots::ChangedFiles(vec![
+            rename("util.rs", "src/util.rs"),
+            rename("LICENSE", "COPYING"),
+        ]);
+        let mut app = FolderApp::new(session).unwrap();
+        app.update(Action::Resize {
+            width: 60,
+            height: 10,
+        });
+        Fixture { _l: l, _r: r, app }
+    }
+
+    #[test]
+    fn changed_files_screen_lists_full_paths_and_renames() {
+        let f = changeset();
+        let mut t = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        t.draw(|fr| render(&f.app, fr)).unwrap();
+        insta::assert_snapshot!(t.backend().to_string(), @r#"
+        " HEAD^  ⇄  HEAD                                             "
+        " > LICENSE -> COPYING                                       "
+        " + docs/guide/intro.md                                      "
+        " ~ src/lib.rs                                               "
+        " ~ util.rs -> src/util.rs                                   "
+        "                                                            "
+        "                                                            "
+        "                                                            "
+        "                                                            "
+        " [s]ame:hi… ~2 -0 +1 =1 >2  enter:open F1:keys :help q:quit "
+        "#);
+        let buf = t.backend().buffer();
+        let row = |y: u16| (0..60).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        let pure = (1..9).find(|&y| row(y).contains("LICENSE")).unwrap();
+        assert_eq!(buf[(1, pure)].fg, Color::Cyan, "pure rename");
+    }
+
+    #[test]
+    fn opening_a_rename_compares_old_path_with_new_path() {
+        let mut f = changeset();
+        let at = paths(&f.app)
+            .iter()
+            .position(|p| *p == "src/util.rs")
+            .unwrap();
+        f.app.update(Action::Down(at));
+        f.app.update(Action::Open);
+        let Some(Child::Text(child)) = f.app.child.as_ref() else {
+            panic!("text diff opened")
+        };
+        assert_eq!(child.session.left_label, "HEAD^/util.rs");
+        assert_eq!(child.session.right_label, "HEAD/src/util.rs");
+        let stats = child.diff.stats();
+        assert_eq!((stats.equal, stats.removed, stats.added), (1, 1, 1));
+    }
+
+    #[test]
+    fn pure_renames_stay_listed_when_identical_files_are_hidden() {
+        let f = changeset();
+        assert!(!f.app.show_same);
+        assert!(paths(&f.app).contains(&"COPYING"));
     }
 }

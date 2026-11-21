@@ -21,6 +21,10 @@ pub struct Cli {
     /// Right input (file, directory, or `-` for stdin).
     pub right: Option<PathBuf>,
 
+    /// Describe the AI output format (for an agent's instructions) and exit.
+    #[arg(long, help_heading = "AI output")]
+    pub ai_help: bool,
+
     #[command(flatten)]
     pub output: OutputArgs,
 
@@ -53,6 +57,38 @@ pub enum GitCommand {
         remote: PathBuf,
         /// Path in the repository ($MERGED); empty for `git difftool -d`.
         merged: Option<String>,
+        #[command(flatten)]
+        run: RunArgs,
+    },
+    /// Every file a commit changed, in the folder view (vs its first parent).
+    ///
+    /// Files are listed by their full repository path; renames are one entry.
+    /// Piped, it prints a unified diff of each file.
+    Show {
+        /// The commit [default: HEAD].
+        #[arg(value_name = "COMMIT")]
+        commit: Option<String>,
+        /// Only these paths (after `--`, as in git).
+        #[arg(last = true, value_name = "PATH")]
+        paths: Vec<String>,
+        #[command(flatten)]
+        run: RunArgs,
+    },
+    /// Every changed file of a `git diff`, in the folder view.
+    ///
+    /// Takes git diff's revisions: none (work tree vs index), `--staged`
+    /// (index vs HEAD), `<rev>` (work tree vs rev), `<a> <b>`, `<a>..<b>`
+    /// or `<a>...<b>` (b vs the merge base).
+    Diff {
+        /// Compare the index (what is staged) instead of the work tree.
+        #[arg(long, visible_alias = "cached")]
+        staged: bool,
+        /// Zero, one or two revisions, as for `git diff`.
+        #[arg(value_name = "REV", num_args = 0..=2)]
+        revs: Vec<String>,
+        /// Only these paths (after `--`, as in git).
+        #[arg(last = true, value_name = "PATH")]
+        paths: Vec<String>,
         #[command(flatten)]
         run: RunArgs,
     },
@@ -134,6 +170,8 @@ pub enum Format {
     SideBySide,
     /// Machine-readable JSON.
     Json,
+    /// Compact annotated text for AI agents and LLM prompts (see --ai-help).
+    Ai,
     /// One-paragraph summary.
     Summary,
 }
@@ -172,6 +210,21 @@ pub struct OutputArgs {
     /// Print nothing; only set the exit status.
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// AI-friendly output: compact annotated text, never interactive (also
+    /// MYDIFF_AI=1; format described by --ai-help).
+    #[allow(clippy::doc_markdown, reason = "shown verbatim in --help")]
+    #[arg(long, help_heading = "AI output")]
+    pub ai: bool,
+
+    /// Stop AI output after N lines [default: $MYDIFF_AI_BUDGET, else 2000; 0 = no limit].
+    #[allow(clippy::doc_markdown, reason = "shown verbatim in --help")]
+    #[arg(long, value_name = "N", help_heading = "AI output")]
+    pub budget: Option<usize>,
+
+    /// Show only this hunk of AI output, in full, e.g. `src/lib.rs#2` (repeatable).
+    #[arg(long, value_name = "ID", help_heading = "AI output")]
+    pub hunk: Vec<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -421,6 +474,28 @@ mod tests {
         };
         assert_eq!(merged, None);
         assert_eq!(run.output.label, ["x"]);
+    }
+
+    #[test]
+    fn git_show_takes_a_commit_options_and_paths() {
+        let cli = parse(&["git", "show", "-w", "HEAD~2", "--", "src", "-odd"]);
+        let Some(Command::Git(GitCommand::Show { commit, paths, run })) = cli.command else {
+            panic!("parsed as git show")
+        };
+        assert_eq!(commit.as_deref(), Some("HEAD~2"));
+        assert_eq!(paths, ["src", "-odd"]);
+        assert!(run.compare.ignore_all_space);
+    }
+
+    #[test]
+    fn git_diff_takes_up_to_two_revisions() {
+        let cli = parse(&["git", "diff", "--cached", "main"]);
+        let Some(Command::Git(GitCommand::Diff { staged, revs, .. })) = cli.command else {
+            panic!("parsed as git diff")
+        };
+        assert!(staged);
+        assert_eq!(revs, ["main"]);
+        assert!(Cli::try_parse_from(["mydiff", "git", "diff", "a", "b", "c"]).is_err());
     }
 
     #[test]

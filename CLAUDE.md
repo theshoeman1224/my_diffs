@@ -33,6 +33,7 @@ crates/mydiff-tui/    ratatui app, Elm style: keys.rs → app.rs update() → vi
   src/cmdline.rs      the bottom `/` `?` `:` line: editing, history, `:` command parsing
 crates/mydiff/        binary: args.rs (clap), settings.rs (config discovery), app.rs (dispatch),
                       git.rs (git difftool / external diff adapters),
+                      git/changes.rs (`mydiff git show|diff`: changed files → temp dirs → folder view),
                       state.rs (viewer state kept between runs: $XDG_STATE_HOME/mydiff/state.toml),
                       output/ (unified, side-by-side, json, summary, folder, hex, structured)
   tests/cmd/*.trycmd  CLI transcripts, run with tests/cmd/<name>.in/ as the working directory

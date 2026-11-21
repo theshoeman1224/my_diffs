@@ -30,7 +30,7 @@ mydiff dir_a/ dir_b/           # folder list; Enter opens a file, Esc returns
 | `n` / `N` | next / previous match; in the folder and hex views, next / previous change |
 | `Tab` or `Ctrl-w w` / `Ctrl-w h` / `Ctrl-w l` | make the other / left / right pane active |
 | `j` `k` ↑ ↓ wheel, PgUp/PgDn, `g`/`G` | scroll |
-| `h` `l` ← → | scroll horizontally |
+| `h` `l` ← → | scroll horizontally (stops when the longest line's end is in view) |
 | `w` | whitespace mode: exact → trailing → change → all |
 | `i` / `b` / `e` | ignore case / blank lines / line endings |
 | `u` | side-by-side ↔ inline layout |
@@ -206,9 +206,32 @@ Common options (see `mydiff --help` for all):
 | `--ignore-path '$.meta.time'` | JSON/YAML: skip a path (`[*]` and `.*` wildcards) |
 | `--mode text\|dir\|binary\|json\|yaml\|csv` | override auto-detection |
 | `-L LABEL` (twice) | names to show for left and right, like `diff -L` |
+| `--ai`, `--budget N`, `--hunk ID` | AI-friendly output (see [below](#for-ai-agents-and-llm-prompts)) |
 | `-P NAME`, `--config FILE`, `--no-config` | profiles and config files |
 
 ## Using it from git
+
+### A whole commit at once
+
+```sh
+mydiff git show                  # every file HEAD changed, in the folder view
+mydiff git show abc123 -- src/   # one commit, limited to paths
+mydiff git diff                  # uncommitted changes (work tree vs index)
+mydiff git diff --staged         # what is staged (index vs HEAD)
+mydiff git diff main             # work tree vs main
+mydiff git diff main..topic      # also `main topic`, and `main...topic` (vs the merge base)
+```
+
+These need no git config. Revisions mean what they mean to `git diff`, and a
+merge commit is shown against its first parent. The folder view lists only the
+changed files, each by its full path (`docs/guide/intro.md`, not a collapsed
+`docs/`), and a rename is one row, `> old -> new` (cyan) or `~ old -> new`
+when the content changed too. Enter diffs the old path against the new one.
+Piped or with `-f unified`, the output is a patch per file, with added and
+deleted files shown in full against `/dev/null`. `-f json` gives each rename a
+`renamed_from`. Comparison options (`-w`, `--include`, ...) apply as usual.
+
+### As git's difftool
 
 ```sh
 mydiff git setup >> ~/.gitconfig   # registers mydiff as git's difftool
@@ -225,6 +248,35 @@ at the end of the snippet (`git diff --no-ext-diff` bypasses it). In that mode
 mydiff exits 0 even when files differ, because git treats any other status as
 a crash. Comparison options go before the git arguments, for example
 `mydiff git external -w`.
+
+## For AI agents and LLM prompts
+
+```sh
+mydiff --ai old.txt new.txt          # or -f ai; works for files, folders and git
+MYDIFF_AI=1 mydiff git show          # export MYDIFF_AI=1 once in an agent's shell
+mydiff --ai-help                     # the format, to paste into an agent's instructions
+```
+
+AI output is read-only, never opens the viewer and has no color. It starts with
+a summary and a list of changed files (`M`/`A`/`D`/`R`/`B` plus `+added
+-removed`), then each hunk with an id (`src/lib.rs#2`). Every line shows
+**both** line numbers and its exact text, so an agent can quote it in an edit:
+
+```text
+@@ src/main.rs#1 -1,2 +1,3 @@
+1 1   fn main() {
+2   -     old();
+  2 +     run();
+  3 + }
+```
+
+Output stops after a line budget (`--budget N`, else `MYDIFF_AI_BUDGET`, else
+2000; `0` = no limit) and ends with a `truncated:` line naming what was left
+out. `--hunk <id>` (repeatable) shows only those hunks, in full, and
+`--include <path>` narrows to files. Lockfiles and minified files are listed
+but not expanded unless `--include` names them; whitespace-only changes and
+pure renames are tagged. Under `git diff` with mydiff as external diff,
+`MYDIFF_AI` is ignored so git's output stays a patch.
 
 ## Config file
 
