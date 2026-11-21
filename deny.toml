@@ -2,6 +2,12 @@
 
 [advisories]
 version = 2
+ignore = [
+    # humantime is flagged unmaintained (it wraps chrono). It is only reached
+    # through trycmd, a dev-dependency, so it never ships in the binary, and no
+    # trycmd release avoids it yet. Re-check when trycmd updates.
+    { id = "RUSTSEC-2026-0542", reason = "dev-only via trycmd; unmaintained, not a vulnerability; no fixed release" },
+]
 
 [licenses]
 version = 2

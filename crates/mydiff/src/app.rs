@@ -9,7 +9,9 @@ use mydiff_core::detect::{Kind, detect};
 use mydiff_core::{DiffOptions, diff_text};
 use serde::Serialize;
 
-use crate::args::{Cli, ColorWhen, Command, ConfigCommand, Format, Mode};
+use crate::args::{
+    Cli, ColorWhen, Command, CompareArgs, ConfigArgs, ConfigCommand, Format, Mode, OutputArgs,
+};
 use mydiff_core::structured::{self as st, Format as Format_};
 
 use crate::output::{
@@ -34,6 +36,31 @@ impl Outcome {
     }
 }
 
+/// Who asked for the comparison; git entry points change a few defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caller {
+    /// Run directly from the command line.
+    User,
+    /// `git difftool`: a viewer, like `User`, but unparsable structured files
+    /// fall back to a text diff instead of failing.
+    GitDifftool,
+    /// Git's external diff driver: unified output by default, colored when
+    /// git pipes to its pager, and the same text fallback as `GitDifftool`.
+    GitExternal,
+}
+
+/// One comparison to run.
+#[derive(Debug)]
+pub struct Job {
+    pub left: PathBuf,
+    pub right: PathBuf,
+    /// Names to show instead of the paths (`-L` still wins).
+    pub labels: [Option<String>; 2],
+    /// Header printed before unified output (git's `diff --git` lines).
+    pub preamble: Option<String>,
+    pub caller: Caller,
+}
+
 /// Resolved presentation settings.
 struct Ctx {
     left_label: String,
@@ -42,32 +69,74 @@ struct Ctx {
     theme: Theme,
     width: usize,
     quiet: bool,
+    /// Fall back to a text diff when a structured file does not parse.
+    lenient: bool,
 }
 
 pub fn run(cli: Cli) -> Result<Outcome> {
-    if let Some(Command::Config(cmd)) = cli.command {
-        config_command(cmd)?;
-        return Ok(Outcome::Same);
+    match cli.command {
+        Some(Command::Config(cmd)) => {
+            config_command(cmd)?;
+            Ok(Outcome::Same)
+        }
+        Some(Command::Git(cmd)) => crate::git::run(cmd),
+        None => {
+            let (Some(left), Some(right)) = (cli.left, cli.right) else {
+                bail!("two inputs are required: mydiff [OPTIONS] <LEFT> <RIGHT> (see --help)");
+            };
+            let job = Job {
+                left,
+                right,
+                labels: [None, None],
+                preamble: None,
+                caller: Caller::User,
+            };
+            compare(job, &cli.output, &cli.config, &cli.compare)
+        }
     }
-    let (Some(left), Some(right)) = (cli.left, cli.right) else {
-        bail!("two inputs are required: mydiff [OPTIONS] <LEFT> <RIGHT> (see --help)");
-    };
-    let opts = settings::load_options(&cli.config, &cli.compare)?;
+}
+
+/// `-L` values as `[left, right]`.
+fn user_labels(labels: &[String]) -> Result<[Option<String>; 2]> {
+    match labels {
+        [] => Ok([None, None]),
+        [l] => Ok([Some(l.clone()), None]),
+        [l, r] => Ok([Some(l.clone()), Some(r.clone())]),
+        _ => bail!("--label can be given at most twice (left, then right)"),
+    }
+}
+
+/// Git sets `GIT_PAGER_IN_USE` when our stdout is its pager; color then, as git does.
+fn git_pager_wants_color() -> bool {
+    std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+        && std::env::var("GIT_PAGER_IN_USE").is_ok_and(|v| v == "true" || v == "1")
+}
+
+pub fn compare(
+    job: Job,
+    output: &OutputArgs,
+    config: &ConfigArgs,
+    compare: &CompareArgs,
+) -> Result<Outcome> {
+    let [user_left, user_right] = user_labels(&output.label)?;
+    let opts = settings::load_options(config, compare)?;
     let stdout_tty = std::io::stdout().is_terminal();
-    let format = cli.output.format.unwrap_or(if stdout_tty {
-        Format::Tui
-    } else {
-        Format::Unified
-    });
-    let color = match cli.output.color {
+    let format = output
+        .format
+        .unwrap_or(if stdout_tty && job.caller != Caller::GitExternal {
+            Format::Tui
+        } else {
+            Format::Unified
+        });
+    let color = match output.color {
         ColorWhen::Always => true,
         ColorWhen::Never => false,
         ColorWhen::Auto => {
-            anstream::AutoStream::choice(&std::io::stdout()) != anstream::ColorChoice::Never
+            (job.caller == Caller::GitExternal && git_pager_wants_color())
+                || anstream::AutoStream::choice(&std::io::stdout()) != anstream::ColorChoice::Never
         }
     };
-    let width = cli
-        .output
+    let width = output
         .width
         .or_else(|| std::env::var("COLUMNS").ok()?.parse().ok())
         .or_else(|| {
@@ -80,25 +149,34 @@ pub fn run(cli: Cli) -> Result<Outcome> {
                 .flatten()
         })
         .unwrap_or(120);
-    let (left, right) = pair_paths(left, right)?;
+    let [job_left, job_right] = job.labels;
+    let (left, right) = pair_paths(job.left, job.right)?;
     let ctx = Ctx {
-        left_label: label(&left),
-        right_label: label(&right),
+        left_label: user_left.or(job_left).unwrap_or_else(|| label(&left)),
+        right_label: user_right.or(job_right).unwrap_or_else(|| label(&right)),
         format,
         theme: Theme { color },
         width,
-        quiet: cli.output.quiet,
+        quiet: output.quiet,
+        lenient: job.caller != Caller::User,
     };
+    if let Some(pre) = &job.preamble
+        && format == Format::Unified
+        && !ctx.quiet
+    {
+        emit(&ctx.theme.paint(Theme::header(), pre.trim_end()))?;
+        emit("\n")?;
+    }
 
     if left.is_dir() && right.is_dir() {
         return folder(&ctx, &left, &right, &opts);
     }
-    if cli.output.mode == Mode::Dir {
+    if output.mode == Mode::Dir {
         bail!("--mode dir needs two directories");
     }
     let lb = read_input(&left)?;
     let rb = read_input(&right)?;
-    let kind = match cli.output.mode {
+    let kind = match output.mode {
         Mode::Auto => detect(&left, &lb, &right, &rb),
         Mode::Text => Kind::Text,
         Mode::Binary => Kind::Binary,
@@ -231,8 +309,16 @@ fn structured(
     opts: &DiffOptions,
 ) -> Result<Outcome> {
     let (lt, rt) = (String::from_utf8_lossy(lb), String::from_utf8_lossy(rb));
-    let lv = st::parse(&lt, format, "left", opts)?;
-    let rv = st::parse(&rt, format, "right", opts)?;
+    let parsed = st::parse(&lt, format, "left", opts)
+        .and_then(|lv| Ok((lv, st::parse(&rt, format, "right", opts)?)));
+    let (lv, rv) = match parsed {
+        Ok(v) => v,
+        Err(e) if ctx.lenient => {
+            eprintln!("mydiff: note: {e}; showing a text diff");
+            return text(ctx, lb, rb, opts);
+        }
+        Err(e) => return Err(e.into()),
+    };
     let diff = st::diff_values(&lv, &rv, opts)?;
     let outcome = Outcome::from_identical(diff.is_identical());
     if ctx.quiet {
@@ -352,6 +438,8 @@ fn folder(ctx: &Ctx, left: &Path, right: &Path, opts: &DiffOptions) -> Result<Ou
         mydiff_tui::run_folder(mydiff_tui::FolderSession {
             left_root: left.to_path_buf(),
             right_root: right.to_path_buf(),
+            left_label: ctx.left_label.clone(),
+            right_label: ctx.right_label.clone(),
             options: opts.clone(),
         })?;
         // Exit status reflects the comparison with the options as given.
@@ -366,8 +454,8 @@ fn folder(ctx: &Ctx, left: &Path, right: &Path, opts: &DiffOptions) -> Result<Ou
         Format::Tui => unreachable!("handled above"),
         Format::Unified => emit(&folder_out::unified_all(
             &diff,
-            left,
-            right,
+            [left, right],
+            [l, r],
             opts,
             ctx.theme,
             |p| std::fs::read(p),

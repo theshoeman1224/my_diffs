@@ -62,23 +62,30 @@ pub fn summary_line(left: &str, right: &str, s: &FolderStats) -> String {
 
 /// `diff -r`-style output: a unified diff per differing text file, and one line
 /// per other difference.
+///
+/// Files are read under `roots`; `labels` name the roots in the output (they
+/// are usually the same paths, or `a/` and `b/` under git).
 pub fn unified_all(
     diff: &FolderDiff,
-    left: &Path,
-    right: &Path,
+    [left, right]: [&Path; 2],
+    [left_label, right_label]: [&str; 2],
     opts: &DiffOptions,
     theme: Theme,
     read: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
 ) -> String {
     let mut out = String::new();
-    let lp = |rel: &str| left.join(rel).display().to_string();
-    let rp = |rel: &str| right.join(rel).display().to_string();
+    let lp = |rel: &str| Path::new(left_label).join(rel).display().to_string();
+    let rp = |rel: &str| Path::new(right_label).join(rel).display().to_string();
+    let (left_name, right_name) = (
+        left_label.trim_end_matches('/'),
+        right_label.trim_end_matches('/'),
+    );
     for e in &diff.entries {
         let p = e.path.as_str();
         let line = match &e.status {
             EntryStatus::Same => continue,
-            EntryStatus::OnlyLeft => format!("Only in {}: {p}", left.display()),
-            EntryStatus::OnlyRight => format!("Only in {}: {p}", right.display()),
+            EntryStatus::OnlyLeft => format!("Only in {left_name}: {p}"),
+            EntryStatus::OnlyRight => format!("Only in {right_name}: {p}"),
             EntryStatus::TypeMismatch => {
                 format!("{} and {} are a file and a directory", lp(p), rp(p))
             }
@@ -171,8 +178,8 @@ mod tests {
         };
         let out = unified_all(
             &sample(),
-            Path::new("L"),
-            Path::new("R"),
+            [Path::new("L"), Path::new("R")],
+            ["L", "R"],
             &DiffOptions::default(),
             Theme::PLAIN,
             read,
@@ -189,5 +196,30 @@ mod tests {
         L/x and R/x are a file and a directory
         Cannot compare y: permission denied
         ");
+    }
+
+    #[test]
+    fn unified_all_names_files_by_label_but_reads_roots() {
+        let read = |p: &Path| -> std::io::Result<Vec<u8>> {
+            Ok(match p.to_str().unwrap() {
+                "/tmp/x/left/a.txt" => b"one\n".to_vec(),
+                "/tmp/x/right/a.txt" => b"two\n".to_vec(),
+                _ => b"\0".to_vec(),
+            })
+        };
+        let out = unified_all(
+            &sample(),
+            [Path::new("/tmp/x/left"), Path::new("/tmp/x/right")],
+            ["a/", "b/"],
+            &DiffOptions::default(),
+            Theme::PLAIN,
+            read,
+        );
+        assert!(out.starts_with("--- a/a.txt\n+++ b/a.txt\n"), "{out}");
+        assert!(
+            out.contains("Only in a: gone\n") && out.contains("Only in b: new\n"),
+            "{out}"
+        );
+        assert!(!out.contains("/tmp/x"), "{out}");
     }
 }

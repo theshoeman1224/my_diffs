@@ -50,7 +50,33 @@ impl Child {
 pub struct FolderSession {
     pub left_root: PathBuf,
     pub right_root: PathBuf,
+    /// Shown instead of the roots (e.g. `a/` and `b/` for git temp dirs).
+    pub left_label: String,
+    pub right_label: String,
     pub options: DiffOptions,
+}
+
+impl FolderSession {
+    /// Compare two roots, labelled by their own paths.
+    pub fn new(left_root: PathBuf, right_root: PathBuf, options: DiffOptions) -> Self {
+        Self {
+            left_label: left_root.display().to_string(),
+            right_label: right_root.display().to_string(),
+            left_root,
+            right_root,
+            options,
+        }
+    }
+
+    /// Display label of `rel` under the left or right root.
+    pub fn label(&self, right: bool, rel: &str) -> String {
+        let root = if right {
+            &self.right_label
+        } else {
+            &self.left_label
+        };
+        std::path::Path::new(root).join(rel).display().to_string()
+    }
 }
 
 #[derive(Debug)]
@@ -276,18 +302,8 @@ impl FolderApp {
         };
         if looks_binary(&left) || looks_binary(&right) {
             let mut child = HexApp::new(HexSession {
-                left_label: self
-                    .session
-                    .left_root
-                    .join(&entry.path)
-                    .display()
-                    .to_string(),
-                right_label: self
-                    .session
-                    .right_root
-                    .join(&entry.path)
-                    .display()
-                    .to_string(),
+                left_label: self.session.label(false, &entry.path),
+                right_label: self.session.label(true, &entry.path),
                 diff: mydiff_core::binary::diff_bytes(left, right),
             });
             child.update(size);
@@ -295,18 +311,8 @@ impl FolderApp {
             return;
         }
         let session = TextSession {
-            left_label: self
-                .session
-                .left_root
-                .join(&entry.path)
-                .display()
-                .to_string(),
-            right_label: self
-                .session
-                .right_root
-                .join(&entry.path)
-                .display()
-                .to_string(),
+            left_label: self.session.label(false, &entry.path),
+            right_label: self.session.label(true, &entry.path),
             left: String::from_utf8_lossy(&left).into_owned(),
             right: String::from_utf8_lossy(&right).into_owned(),
             options: self.session.options.clone(),
@@ -346,8 +352,7 @@ pub fn render(app: &FolderApp, frame: &mut Frame) {
     let w = usize::from(header.width);
     let title = format!(
         " {}  ⇄  {}",
-        app.session.left_root.display(),
-        app.session.right_root.display()
+        app.session.left_label, app.session.right_label
     );
     frame.render_widget(
         Paragraph::new(view::pad(&title, w)).style(view::bar()),
@@ -446,11 +451,11 @@ mod tests {
         write(r.path(), "e_bin", b"\0\x02");
         write(l.path(), "f_ws.txt", b"a  b\n");
         write(r.path(), "f_ws.txt", b"a b\n");
-        let mut app = FolderApp::new(FolderSession {
-            left_root: l.path().to_path_buf(),
-            right_root: r.path().to_path_buf(),
-            options: DiffOptions::default(),
-        })
+        let mut app = FolderApp::new(FolderSession::new(
+            l.path().to_path_buf(),
+            r.path().to_path_buf(),
+            DiffOptions::default(),
+        ))
         .unwrap();
         app.update(Action::Resize {
             width: 60,
@@ -545,6 +550,23 @@ mod tests {
             panic!("hex view opened")
         };
         assert_eq!(hex.session.diff.stats().differing_bytes, 1);
+    }
+
+    #[test]
+    fn labels_replace_roots_in_header_and_opened_files() {
+        let mut f = fixture();
+        f.app.session.left_label = "a/".into();
+        f.app.session.right_label = "b/".into();
+        let mut t = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        t.draw(|fr| render(&f.app, fr)).unwrap();
+        let header = t.backend().to_string().lines().next().unwrap().to_owned();
+        assert!(header.contains("a/  ⇄  b/"), "{header}");
+        f.app.update(Action::Open);
+        let Some(Child::Text(child)) = f.app.child.as_ref() else {
+            panic!("text diff opened")
+        };
+        assert_eq!(child.session.left_label, "a/a_changed.txt");
+        assert_eq!(child.session.right_label, "b/a_changed.txt");
     }
 
     #[test]

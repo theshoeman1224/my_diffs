@@ -36,6 +36,55 @@ pub enum Command {
     /// Work with configuration files.
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// Use mydiff from git (`git difftool`, `git diff`).
+    #[command(subcommand)]
+    Git(GitCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GitCommand {
+    /// Print git config that makes mydiff git's difftool; append it to ~/.gitconfig.
+    Setup,
+    /// Entry point for `git difftool` (called as: difftool "$LOCAL" "$REMOTE" "$MERGED").
+    Difftool {
+        /// Old version ($LOCAL): a temp file, a directory with -d, or /dev/null.
+        local: PathBuf,
+        /// New version ($REMOTE).
+        remote: PathBuf,
+        /// Path in the repository ($MERGED); empty for `git difftool -d`.
+        merged: Option<String>,
+        #[command(flatten)]
+        run: RunArgs,
+    },
+    /// Entry point for git's external diff (`GIT_EXTERNAL_DIFF` or `diff.external`).
+    ///
+    /// Prints a unified diff and exits 0 when files differ, because git stops
+    /// at any other status. Put mydiff options before the git arguments.
+    External {
+        /// The arguments git appends: path old-file old-hex old-mode new-file
+        /// new-hex new-mode [new-path rename-message].
+        #[arg(
+            required = true,
+            num_args = 7..=9,
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "GIT_ARGS"
+        )]
+        args: Vec<String>,
+        #[command(flatten)]
+        run: RunArgs,
+    },
+}
+
+/// Output, configuration and comparison options shared by the git entry points.
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    #[command(flatten)]
+    pub output: OutputArgs,
+    #[command(flatten)]
+    pub config: ConfigArgs,
+    #[command(flatten)]
+    pub compare: CompareArgs,
 }
 
 #[derive(Debug, Subcommand)]
@@ -111,6 +160,10 @@ pub struct OutputArgs {
     #[allow(clippy::doc_markdown, reason = "shown verbatim in --help")]
     #[arg(long, value_enum, default_value_t = ColorWhen::Auto)]
     pub color: ColorWhen,
+
+    /// Name to show for the left input, then the right (give it twice, like `diff -L`).
+    #[arg(short = 'L', long, value_name = "LABEL")]
+    pub label: Vec<String>,
 
     /// Total width for side-by-side output [default: $COLUMNS or 120].
     #[arg(long)]
@@ -327,6 +380,57 @@ mod tests {
     #[test]
     fn clap_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn git_external_takes_options_then_git_arguments_verbatim() {
+        let cli = parse(&[
+            "git",
+            "external",
+            "-w",
+            "--color",
+            "never",
+            "-x.txt",
+            "/tmp/blob/-x.txt",
+            ".",
+            ".",
+            "-x.txt",
+            "abc",
+            "100644",
+        ]);
+        let Some(Command::Git(GitCommand::External { args, run })) = cli.command else {
+            panic!("parsed as git external")
+        };
+        assert_eq!(args.len(), 7, "{args:?}");
+        assert_eq!(args[0], "-x.txt", "hyphenated paths stay positional");
+        assert!(run.compare.ignore_all_space);
+        assert_eq!(run.output.color, ColorWhen::Never);
+    }
+
+    #[test]
+    fn git_external_rejects_too_few_arguments() {
+        let r = Cli::try_parse_from(["mydiff", "git", "external", "a", "b"]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn git_difftool_merged_is_optional() {
+        let cli = parse(&["git", "difftool", "-L", "x", "/tmp/l", "/tmp/r"]);
+        let Some(Command::Git(GitCommand::Difftool { merged, run, .. })) = cli.command else {
+            panic!("parsed as git difftool")
+        };
+        assert_eq!(merged, None);
+        assert_eq!(run.output.label, ["x"]);
+    }
+
+    #[test]
+    fn labels_repeat() {
+        assert_eq!(
+            parse(&["-L", "old", "--label", "new", "a", "b"])
+                .output
+                .label,
+            ["old", "new"]
+        );
     }
 
     #[test]
