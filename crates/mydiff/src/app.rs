@@ -271,12 +271,17 @@ fn text(ctx: &Ctx, lb: &[u8], rb: &[u8], opts: &DiffOptions) -> Result<Outcome> 
     }
     let (l, r) = (ctx.left_label.as_str(), ctx.right_label.as_str());
     match ctx.format {
-        Format::Tui => mydiff_tui::run_text(mydiff_tui::TextSession {
-            left_label: l.to_owned(),
-            right_label: r.to_owned(),
-            left: lt.into_owned(),
-            right: rt.into_owned(),
-            options: opts.clone(),
+        Format::Tui => crate::state::with_sidebar(|sidebar| {
+            mydiff_tui::run_text(
+                mydiff_tui::TextSession {
+                    left_label: l.to_owned(),
+                    right_label: r.to_owned(),
+                    left: lt.into_owned(),
+                    right: rt.into_owned(),
+                    options: opts.clone(),
+                },
+                sidebar,
+            )
         })?,
         Format::Unified => emit(&unified::render(&diff, l, r, opts.context, ctx.theme))?,
         Format::SideBySide => emit(&side_by_side::render(&diff, l, r, ctx.width, ctx.theme))?,
@@ -340,12 +345,17 @@ fn structured(
     match ctx.format {
         Format::Tui => {
             let (left, right) = canonical()?;
-            mydiff_tui::run_text(mydiff_tui::TextSession {
-                left_label: format!("{l} ({name}, canonical)"),
-                right_label: format!("{r} ({name}, canonical)"),
-                left,
-                right,
-                options: opts.clone(),
+            crate::state::with_sidebar(|sidebar| {
+                mydiff_tui::run_text(
+                    mydiff_tui::TextSession {
+                        left_label: format!("{l} ({name}, canonical)"),
+                        right_label: format!("{r} ({name}, canonical)"),
+                        left,
+                        right,
+                        options: opts.clone(),
+                    },
+                    sidebar,
+                )
             })?;
         }
         Format::SideBySide => {
@@ -390,10 +400,15 @@ fn binary(ctx: &Ctx, lb: Vec<u8>, rb: Vec<u8>) -> Result<Outcome> {
     }
     let (l, r) = (ctx.left_label.as_str(), ctx.right_label.as_str());
     match ctx.format {
-        Format::Tui => mydiff_tui::run_hex(mydiff_tui::HexSession {
-            left_label: l.to_owned(),
-            right_label: r.to_owned(),
-            diff,
+        Format::Tui => crate::state::with_sidebar(|sidebar| {
+            mydiff_tui::run_hex(
+                mydiff_tui::HexSession {
+                    left_label: l.to_owned(),
+                    right_label: r.to_owned(),
+                    diff,
+                },
+                sidebar,
+            )
         })?,
         Format::Unified => emit(&hex::unified(&diff, l, r, ctx.theme))?,
         Format::SideBySide => emit(&hex::side_by_side(&diff, ctx.theme))?,
@@ -435,12 +450,17 @@ struct FolderBody<'a> {
 
 fn folder(ctx: &Ctx, left: &Path, right: &Path, opts: &DiffOptions) -> Result<Outcome> {
     if ctx.format == Format::Tui && !ctx.quiet {
-        mydiff_tui::run_folder(mydiff_tui::FolderSession {
-            left_root: left.to_path_buf(),
-            right_root: right.to_path_buf(),
-            left_label: ctx.left_label.clone(),
-            right_label: ctx.right_label.clone(),
-            options: opts.clone(),
+        crate::state::with_sidebar(|sidebar| {
+            mydiff_tui::run_folder(
+                mydiff_tui::FolderSession {
+                    left_root: left.to_path_buf(),
+                    right_root: right.to_path_buf(),
+                    left_label: ctx.left_label.clone(),
+                    right_label: ctx.right_label.clone(),
+                    options: opts.clone(),
+                },
+                sidebar,
+            )
         })?;
         // Exit status reflects the comparison with the options as given.
     }

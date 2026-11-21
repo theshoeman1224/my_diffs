@@ -9,7 +9,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::{Action, CHROME_ROWS, JUMP_CONTEXT, LineSide, Sidebar};
-use crate::keys::ScreenKind;
+use crate::cmdline::{CmdLine, Command, Message, PromptEvent, PromptKind, parse_command};
+use crate::keys::{InputMode, ScreenKind};
 use crate::view;
 
 /// Inputs for an interactive binary comparison.
@@ -32,7 +33,13 @@ pub struct HexApp {
     pub width: u16,
     pub show_help: bool,
     pub sidebar: Sidebar,
+    /// The `:` line (no search in the hex view).
+    pub cmdline: CmdLine,
+    /// Shown in the status bar until the next key.
+    pub message: Option<Message>,
     pub should_quit: bool,
+    /// `:qa`: quit the whole program, not just this view.
+    pub quit_all: bool,
 }
 
 /// Columns of one hex row: marker, offset, 16 bytes, ASCII column.
@@ -63,7 +70,18 @@ impl HexApp {
             width: 80,
             show_help: false,
             sidebar: Sidebar::default(),
+            cmdline: CmdLine::default(),
+            message: None,
             should_quit: false,
+            quit_all: false,
+        }
+    }
+
+    pub fn input_mode(&self) -> InputMode {
+        if self.cmdline.is_open() {
+            InputMode::Prompt
+        } else {
+            InputMode::Normal
         }
     }
 
@@ -78,8 +96,40 @@ impl HexApp {
 
     pub fn update(&mut self, action: Action) {
         let page = self.viewport.saturating_sub(1).max(1);
+        if !matches!(action, Action::Resize { .. }) {
+            self.message = None;
+        }
+        // Nothing to search here, so n / N step through changes.
+        let action = match action {
+            Action::SearchNext => Action::NextChange,
+            Action::SearchPrev => Action::PrevChange,
+            a => a,
+        };
         match action {
-            Action::Quit | Action::ForceQuit => self.should_quit = true,
+            Action::Quit => self.should_quit = true,
+            Action::ForceQuit => {
+                self.should_quit = true;
+                self.quit_all = true;
+            }
+            Action::StartCommand => {
+                self.show_help = false;
+                self.cmdline.open(PromptKind::Command);
+            }
+            Action::Prompt(key) => {
+                if let PromptEvent::Submitted(_, line) = self.cmdline.key(key) {
+                    match parse_command(&line) {
+                        Ok(Some(Command::Help)) => self.show_help = true,
+                        Ok(Some(Command::Sidebar(dock))) => self.sidebar.command(dock),
+                        Ok(Some(Command::Quit)) => self.should_quit = true,
+                        Ok(Some(Command::QuitAll)) => {
+                            self.should_quit = true;
+                            self.quit_all = true;
+                        }
+                        Ok(Some(Command::NoHighlight) | None) => {}
+                        Err(e) => self.message = Some(Message::error(e)),
+                    }
+                }
+            }
             Action::Back => {
                 if self.show_help {
                     self.show_help = false;
@@ -87,7 +137,6 @@ impl HexApp {
                     self.should_quit = true;
                 }
             }
-            Action::ToggleHelp => self.show_help = !self.show_help,
             Action::ToggleSidebar | Action::DockSidebar(_) => self.sidebar.update(action),
             Action::Up(n) => self.scroll_to(self.top.saturating_sub(n)),
             Action::Down(n) => self.scroll_to(self.top + n),
@@ -187,10 +236,16 @@ pub fn render(app: &HexApp, frame: &mut Frame) {
         (None, n) => format!("{n} changed row{}", if n == 1 { "" } else { "s" }),
     };
     let right = format!(
-        "{} bytes differ  {position}  tab:keys ?:help q:quit ",
+        "{} bytes differ  {position}  F1:keys :help q:quit ",
         st.differing_bytes
     );
-    view::render_status_line(frame, status, &left, &right);
+    if let Some(prompt) = &app.cmdline.prompt {
+        view::render_prompt(frame, status, prompt);
+    } else if let Some(message) = &app.message {
+        view::render_message(frame, status, message);
+    } else {
+        view::render_status_line(frame, status, &left, &right);
+    }
     if let Some(area) = sidebar {
         view::render_sidebar(frame, area, app.sidebar.dock, ScreenKind::Hex, &|_| None);
     }
@@ -272,6 +327,49 @@ mod tests {
             height: 22,
         });
         insta::assert_snapshot!(screen_at(&a, 113, 22));
+    }
+
+    fn command(a: &mut HexApp, line: &str) {
+        a.update(Action::StartCommand);
+        assert_eq!(a.input_mode(), InputMode::Prompt);
+        for c in line.chars() {
+            a.update(Action::Prompt(crate::cmdline::PromptKey::Char(c)));
+        }
+        a.update(Action::Prompt(crate::cmdline::PromptKey::Submit));
+    }
+
+    #[test]
+    fn n_and_shift_n_step_through_changed_rows() {
+        let mut a = app();
+        a.update(Action::SearchNext);
+        a.update(Action::SearchNext);
+        assert_eq!(a.current_change, Some(1));
+        a.update(Action::SearchPrev);
+        assert_eq!(a.current_change, Some(0));
+    }
+
+    #[test]
+    fn colon_commands() {
+        let mut a = app();
+        command(&mut a, "help");
+        assert!(a.show_help);
+        command(&mut a, "bogus");
+        assert_eq!(
+            a.message.as_ref().map(|m| m.text.as_str()),
+            Some("E492: Not an editor command: bogus")
+        );
+        assert!(screen_at(&a, 80, 9).contains("E492"));
+        command(&mut a, "qa");
+        assert!(a.should_quit && a.quit_all);
+    }
+
+    #[test]
+    fn command_line_shows_on_the_status_row() {
+        let mut a = app();
+        a.update(Action::StartCommand);
+        a.update(Action::Prompt(crate::cmdline::PromptKey::Char('n')));
+        let s = screen_at(&a, 80, 9);
+        assert_eq!(s.lines().last().unwrap().trim_matches('"').trim_end(), ":n");
     }
 
     #[test]

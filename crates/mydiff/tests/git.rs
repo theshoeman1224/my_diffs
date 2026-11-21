@@ -73,6 +73,7 @@ impl Repo {
         c.env("PATH", path)
             .env("HOME", self.home.path())
             .env("XDG_CONFIG_HOME", "/nonexistent/mydiff-tests")
+            .env("XDG_STATE_HOME", "/nonexistent/mydiff-tests")
             .env("GIT_CONFIG_GLOBAL", &self.gitconfig)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_AUTHOR_NAME", "t")

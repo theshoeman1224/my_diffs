@@ -12,15 +12,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::{Action, App, CHROME_ROWS, Sidebar, TextSession, option_value};
+use crate::cmdline::{CmdLine, Command, PromptEvent, PromptKey, PromptKind, parse_command};
 use crate::hex::{HexApp, HexSession};
-use crate::keys::ScreenKind;
+use crate::keys::{InputMode, ScreenKind};
 use crate::{hex, view};
 
 /// A file comparison opened from the folder list.
 #[derive(Debug)]
 pub enum Child {
-    Text(App),
-    Hex(HexApp),
+    Text(Box<App>),
+    Hex(Box<HexApp>),
 }
 
 impl Child {
@@ -28,6 +29,21 @@ impl Child {
         match self {
             Self::Text(a) => a.update(action),
             Self::Hex(a) => a.update(action),
+        }
+    }
+
+    fn input_mode(&self) -> InputMode {
+        match self {
+            Self::Text(a) => a.input_mode(),
+            Self::Hex(a) => a.input_mode(),
+        }
+    }
+
+    /// (`:q` closed it, `:qa` asked to quit everything).
+    fn exit(&self) -> (bool, bool) {
+        match self {
+            Self::Text(a) => (a.should_quit, a.quit_all),
+            Self::Hex(a) => (a.should_quit, a.quit_all),
         }
     }
 
@@ -106,6 +122,8 @@ pub struct FolderApp {
     pub show_help: bool,
     /// Shared with an opened file diff: handed over on open, taken back on return.
     pub sidebar: Sidebar,
+    /// The `:` line (no search in the folder list).
+    pub cmdline: CmdLine,
     pub should_quit: bool,
 }
 
@@ -128,6 +146,7 @@ impl FolderApp {
             message: None,
             show_help: false,
             sidebar: Sidebar::default(),
+            cmdline: CmdLine::default(),
             should_quit: false,
         };
         app.rebuild_visible(None);
@@ -148,16 +167,23 @@ impl FolderApp {
             self.should_quit = true;
             return;
         }
-        if let Some(child) = &mut self.child {
-            match action {
-                Action::Quit => self.close_child(),
-                Action::Back if !child.show_help() => self.close_child(),
-                _ => child.update(action),
-            }
+        if self.child.is_some() {
+            self.update_child(action);
             return;
         }
         self.message = None;
+        // Nothing to search here, so n / N step through changes.
+        let action = match action {
+            Action::SearchNext => Action::NextChange,
+            Action::SearchPrev => Action::PrevChange,
+            a => a,
+        };
         match action {
+            Action::StartCommand => {
+                self.show_help = false;
+                self.cmdline.open(PromptKind::Command);
+            }
+            Action::Prompt(key) => self.prompt_key(key),
             Action::Quit => self.should_quit = true,
             Action::Back => {
                 if self.show_help {
@@ -166,7 +192,6 @@ impl FolderApp {
                     self.should_quit = true;
                 }
             }
-            Action::ToggleHelp => self.show_help = !self.show_help,
             Action::ToggleSidebar | Action::DockSidebar(_) => self.sidebar.update(action),
             Action::Up(n) => self.select(self.selected.saturating_sub(n)),
             Action::Down(n) => self.select(self.selected + n),
@@ -212,12 +237,63 @@ impl FolderApp {
             | Action::Resize { .. }
             | Action::ScrollLeft
             | Action::ScrollRight
-            | Action::ToggleLayout => {}
+            | Action::ToggleLayout
+            | Action::StartSearch(_)
+            | Action::SearchNext
+            | Action::SearchPrev
+            | Action::SwitchPane
+            | Action::FocusPane(_) => {}
         }
     }
 
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    /// Keys go to the open file diff; `q`, `Esc` and `:q` return to the list.
+    fn update_child(&mut self, action: Action) {
+        let Some(child) = &mut self.child else {
+            return;
+        };
+        match action {
+            Action::Quit => self.close_child(),
+            Action::Back if !child.show_help() => self.close_child(),
+            _ => {
+                child.update(action);
+                match child.exit() {
+                    (_, true) => self.should_quit = true,
+                    (true, false) => self.close_child(),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn prompt_key(&mut self, key: PromptKey) {
+        if let PromptEvent::Submitted(_, line) = self.cmdline.key(key) {
+            match parse_command(&line) {
+                Ok(Some(Command::Help)) => self.show_help = true,
+                Ok(Some(Command::Sidebar(dock))) => self.sidebar.command(dock),
+                Ok(Some(Command::Quit | Command::QuitAll)) => self.should_quit = true,
+                Ok(Some(Command::NoHighlight) | None) => {}
+                Err(e) => self.message = Some(e),
+            }
+        }
+    }
+
+    /// The sidebar as the user sees it now: an open file diff holds it until
+    /// it returns to the list.
+    pub fn current_sidebar(&self) -> Sidebar {
+        self.child.as_ref().map_or(self.sidebar, Child::sidebar)
+    }
+
+    /// Whether keys should edit a command line (this list's or the open file's).
+    pub fn input_mode(&self) -> InputMode {
+        match &self.child {
+            Some(child) => child.input_mode(),
+            None if self.cmdline.is_open() => InputMode::Prompt,
+            None => InputMode::Normal,
+        }
     }
 
     /// Live value shown next to a command in the sidebar.
@@ -341,7 +417,7 @@ impl FolderApp {
             });
             child.update(size);
             child.sidebar = self.sidebar;
-            self.child = Some(Child::Hex(child));
+            self.child = Some(Child::Hex(Box::new(child)));
             return;
         }
         let session = TextSession {
@@ -355,7 +431,7 @@ impl FolderApp {
             Ok(mut child) => {
                 child.update(size);
                 child.sidebar = self.sidebar;
-                self.child = Some(Child::Text(child));
+                self.child = Some(Child::Text(Box::new(child)));
             }
             Err(e) => self.message = Some(e.to_string()),
         }
@@ -438,6 +514,10 @@ fn render_list(app: &FolderApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_status(app: &FolderApp, frame: &mut Frame, area: Rect) {
+    if let Some(prompt) = &app.cmdline.prompt {
+        view::render_prompt(frame, area, prompt);
+        return;
+    }
     let o = &app.session.options;
     let s = app.diff.stats();
     let left = app.message.clone().unwrap_or_else(|| {
@@ -449,7 +529,7 @@ fn render_status(app: &FolderApp, frame: &mut Frame, area: Rect) {
         )
     });
     let right = format!(
-        "~{} -{} +{} ={}  enter:open tab:keys ?:help q:quit ",
+        "~{} -{} +{} ={}  enter:open F1:keys :help q:quit ",
         s.different,
         s.only_left,
         s.only_right + s.type_mismatch + s.errors,
@@ -702,5 +782,80 @@ mod tests {
         "                                                            "
         "#);
         assert!(text.lines().last().unwrap().contains("~3 -1 +1 =1"));
+    }
+
+    fn command(app: &mut FolderApp, line: &str) {
+        app.update(Action::StartCommand);
+        assert_eq!(app.input_mode(), InputMode::Prompt);
+        for c in line.chars() {
+            app.update(Action::Prompt(PromptKey::Char(c)));
+        }
+        app.update(Action::Prompt(PromptKey::Submit));
+    }
+
+    #[test]
+    fn colon_q_in_an_opened_file_returns_to_the_list() {
+        let mut f = fixture();
+        f.app.update(Action::Open);
+        command(&mut f.app, "q");
+        assert!(f.app.child.is_none() && !f.app.should_quit);
+        command(&mut f.app, "q");
+        assert!(f.app.should_quit, ":q on the list quits");
+    }
+
+    #[test]
+    fn colon_qa_in_an_opened_file_quits_everything() {
+        let mut f = fixture();
+        f.app.update(Action::Open);
+        command(&mut f.app, "qa");
+        assert!(f.app.should_quit);
+    }
+
+    #[test]
+    fn opened_file_gets_search_keys() {
+        let mut f = fixture();
+        f.app.update(Action::Open);
+        f.app
+            .update(Action::StartSearch(crate::search::Direction::Forward));
+        assert_eq!(
+            f.app.input_mode(),
+            InputMode::Prompt,
+            "the file's search line"
+        );
+        f.app.update(Action::Prompt(PromptKey::Char('t')));
+        f.app.update(Action::Prompt(PromptKey::Cancel));
+        assert_eq!(f.app.input_mode(), InputMode::Normal);
+        assert!(
+            f.app.child.is_some(),
+            "Esc cancelled the search, not the file"
+        );
+    }
+
+    #[test]
+    fn n_steps_through_changes_in_the_list() {
+        let mut f = fixture();
+        f.app.update(Action::SearchNext);
+        assert_eq!(f.app.selected_path().as_deref(), Some("c_only_left.txt"));
+        f.app.update(Action::SearchPrev);
+        assert_eq!(f.app.selected_path().as_deref(), Some("a_changed.txt"));
+        f.app
+            .update(Action::StartSearch(crate::search::Direction::Forward));
+        assert_eq!(
+            f.app.input_mode(),
+            InputMode::Normal,
+            "no search in the list"
+        );
+    }
+
+    #[test]
+    fn colon_help_and_errors_in_the_list() {
+        let mut f = fixture();
+        command(&mut f.app, "h");
+        assert!(f.app.show_help);
+        command(&mut f.app, "x");
+        assert_eq!(
+            f.app.message.as_deref(),
+            Some("E492: Not an editor command: x")
+        );
     }
 }

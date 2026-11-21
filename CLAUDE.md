@@ -29,8 +29,11 @@ crates/mydiff-core/   pure engine: text in → result model out (no terminal I/O
   tests/properties.rs proptest invariants
 crates/mydiff-tui/    ratatui app, Elm style: keys.rs → app.rs update() → view.rs render()
   src/folder.rs, src/hex.rs   folder list and hex views
+  src/search.rs       vim-style `/` `?` patterns (Rust regex + \c \C \< \>) and next-match logic
+  src/cmdline.rs      the bottom `/` `?` `:` line: editing, history, `:` command parsing
 crates/mydiff/        binary: args.rs (clap), settings.rs (config discovery), app.rs (dispatch),
                       git.rs (git difftool / external diff adapters),
+                      state.rs (viewer state kept between runs: $XDG_STATE_HOME/mydiff/state.toml),
                       output/ (unified, side-by-side, json, summary, folder, hex, structured)
   tests/cmd/*.trycmd  CLI transcripts, run with tests/cmd/<name>.in/ as the working directory
   tests/git.rs        end-to-end: real git runs mydiff via the `mydiff git setup` config
@@ -62,7 +65,7 @@ Pick the **first** row that fits:
 | Behavior under real git (difftool, external diff) | `crates/mydiff/tests/git.rs` | Extend `Repo::new()`; assert or `insta::assert_snapshot!` on git's stdout |
 | CLI flags, exit codes, output formats, errors | `crates/mydiff/tests/cmd/<topic>.trycmd` (+ `<topic>.in/`) | Add a `$ mydiff …` block with `? <status>`, then `TRYCMD=overwrite` |
 | Renderer output (unified, side-by-side…) | Module tests in `crates/mydiff/src/output/` | `insta::assert_snapshot!(…, @"…")` inline |
-| TUI behavior (keys, scrolling, toggles) | `crates/mydiff-tui/src/{keys,app,folder,hex}.rs` tests | Call `update(Action::…)` and assert on state |
+| TUI behavior (keys, scrolling, toggles, search) | `crates/mydiff-tui/src/{keys,app,folder,hex,search,cmdline}.rs` tests | Call `update(Action::…)` and assert on state |
 | TUI appearance | `crates/mydiff-tui/src/view.rs` tests | `TestBackend` + `insta::assert_snapshot!`; check colors via `buffer()[(x, y)].fg` |
 
 Fixture case layouts:
@@ -91,6 +94,8 @@ Fixture case layouts:
 
 1. **The core is pure.** It takes strings or bytes in and returns models out.
    Terminal, color and file-discovery code live in `mydiff` and `mydiff-tui`.
+   `mydiff-tui` does no file I/O either: its `run_*` functions take and return
+   the sidebar state, and `mydiff` (`state.rs`) loads and saves it.
    Folder walking (`folder.rs`) is the single exception.
 2. **Options change the comparison key, never the displayed text.** Toggling
    whitespace or case must not alter what is shown.
@@ -114,7 +119,7 @@ Fixture case layouts:
 2. Use it in the core and add rstest cases plus at least one fixture case.
 3. Add a CLI flag in `CompareArgs` and map it in `CompareArgs::to_layer` (`crates/mydiff/src/args.rs`), and extend the `flags_become_option_keys` test.
 4. Document it in `SAMPLE_CONFIG` (`crates/mydiff-core/src/config.rs`). `sample_config_parses_and_equals_defaults` must keep passing.
-5. If it should be toggleable in the TUI, add an `Action`, a key in `keys.rs` plus a `COMMANDS` entry (the sidebar and help are built from it; tests fail if a key is missing), handle it in `App::update`, and give it a live value in `option_value`.
+5. If it should be toggleable in the TUI, add an `Action`, a key in `keys.rs` plus a `COMMANDS` entry (the sidebar and help are built from it; tests fail if a key is missing), handle it in `App::update`, and give it a live value in `option_value`. Keep vim's meaning for vim keys (`/ ? n N : ]c [c Ctrl-w`): the TUI follows vim/vimdiff where a binding exists.
 6. Add a `.trycmd` example and update the README.
 
 ## Conventions
@@ -124,8 +129,8 @@ Fixture case layouts:
 - Name fixture case folders `snake_case` after the behavior (`whitespace_trailing`, `csv_keyed`).
 - Name test functions after the behavior, not the function (`ignored_lines_stay_patch_correct`).
 - Keep tests deterministic: no network, no clock, no dependence on `$HOME`
-  (CLI tests point `XDG_CONFIG_HOME` at a nonexistent dir; git tests also isolate
-  `HOME`, `GIT_CONFIG_GLOBAL` and strip `GIT_*` variables).
+  (CLI tests point `XDG_CONFIG_HOME` and `XDG_STATE_HOME` at a nonexistent dir; git
+  tests also isolate `HOME`, `GIT_CONFIG_GLOBAL` and strip `GIT_*` variables).
 - trycmd normalizes `\` to `/` in output, so a transcript cannot show
   backslashes faithfully. Test such output with a Rust test instead.
 - Do not commit or push unless asked.
