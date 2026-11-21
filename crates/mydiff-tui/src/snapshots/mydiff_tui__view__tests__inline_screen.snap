@@ -11,4 +11,4 @@ expression: screen(&a)
 "        4 + zeta                                            "
 "   5    5   epsilon                                         "
 "                                                            "
-" [w]s:exact [i]case:off… -1 +1 ~1  2 changes  ?:help q:quit "
+" [w]s:exact [i… -1 +1 ~1  2 changes  tab:keys ?:help q:quit "

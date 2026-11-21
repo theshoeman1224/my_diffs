@@ -1,0 +1,28 @@
+---
+source: crates/mydiff-tui/src/view.rs
+expression: screen(&a)
+---
+" commands                          left.txt                          right.txt                      "
+" Navigate                        │   1 alpha                           1 alpha                      "
+" j/k     down / up               │   2 beta                       -                                 "
+" PgDn/Up page down / up          │   3 gamma                           2 gamma                      "
+" g/G     top / bottom            │   4 delta                      ~    3 delta changed              "
+" n/p     next / prev change      │                                +    4 zeta                       "
+" h/l     scroll left / right     │   5 epsilon                         5 epsilon                    "
+"                                 │                                                                  "
+" Compare                         │                                                                  "
+" w       whitespace        exact │                                                                  "
+" i       ignore case         off │                                                                  "
+" b       ignore blank lines  off │                                                                  "
+" e       ignore line endings  on │                                                                  "
+"                                 │                                                                  "
+" View                            │                                                                  "
+" u       layout     side-by-side │                                                                  "
+"                                 │                                                                  "
+" General                         │                                                                  "
+" Tab     toggle this sidebar     │                                                                  "
+" Tab ←/→ dock left / right       │                                                                  "
+" ?       toggle help             │                                                                  "
+" q/Esc   quit or go back         │                                                                  "
+" Ctrl-c  quit from anywhere      │                                                                  "
+"                                 │ [w]s:exact [i]case:… -1 +1 ~1  2 changes  tab:keys ?:help q:quit "

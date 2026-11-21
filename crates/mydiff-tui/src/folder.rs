@@ -11,8 +11,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::app::{Action, App, CHROME_ROWS, TextSession};
+use crate::app::{Action, App, CHROME_ROWS, Sidebar, TextSession, option_value};
 use crate::hex::{HexApp, HexSession};
+use crate::keys::ScreenKind;
 use crate::{hex, view};
 
 /// A file comparison opened from the folder list.
@@ -34,6 +35,13 @@ impl Child {
         match self {
             Self::Text(a) => a.show_help,
             Self::Hex(a) => a.show_help,
+        }
+    }
+
+    fn sidebar(&self) -> Sidebar {
+        match self {
+            Self::Text(a) => a.sidebar,
+            Self::Hex(a) => a.sidebar,
         }
     }
 
@@ -96,8 +104,13 @@ pub struct FolderApp {
     /// One-shot notice shown in the status bar.
     pub message: Option<String>,
     pub show_help: bool,
+    /// Shared with an opened file diff: handed over on open, taken back on return.
+    pub sidebar: Sidebar,
     pub should_quit: bool,
 }
+
+/// Narrowest folder list that still leaves room for the sidebar.
+pub const MIN_LIST_COLS: u16 = 50;
 
 impl FolderApp {
     pub fn new(session: FolderSession) -> Result<Self> {
@@ -114,6 +127,7 @@ impl FolderApp {
             child: None,
             message: None,
             show_help: false,
+            sidebar: Sidebar::default(),
             should_quit: false,
         };
         app.rebuild_visible(None);
@@ -136,8 +150,8 @@ impl FolderApp {
         }
         if let Some(child) = &mut self.child {
             match action {
-                Action::Quit => self.child = None,
-                Action::Back if !child.show_help() => self.child = None,
+                Action::Quit => self.close_child(),
+                Action::Back if !child.show_help() => self.close_child(),
                 _ => child.update(action),
             }
             return;
@@ -153,6 +167,7 @@ impl FolderApp {
                 }
             }
             Action::ToggleHelp => self.show_help = !self.show_help,
+            Action::ToggleSidebar | Action::DockSidebar(_) => self.sidebar.update(action),
             Action::Up(n) => self.select(self.selected.saturating_sub(n)),
             Action::Down(n) => self.select(self.selected + n),
             Action::PageUp => self.select(self.selected.saturating_sub(self.viewport.max(2) - 1)),
@@ -203,6 +218,24 @@ impl FolderApp {
 
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    /// Live value shown next to a command in the sidebar.
+    pub fn command_value(&self, action: Action) -> Option<(&'static str, bool)> {
+        match action {
+            Action::ToggleSame => Some(if self.show_same {
+                ("shown", true)
+            } else {
+                ("hidden", false)
+            }),
+            _ => option_value(&self.session.options, action),
+        }
+    }
+
+    fn close_child(&mut self) {
+        if let Some(child) = self.child.take() {
+            self.sidebar = child.sidebar();
+        }
     }
 
     fn is_change(&self, visible_idx: usize) -> bool {
@@ -307,6 +340,7 @@ impl FolderApp {
                 diff: mydiff_core::binary::diff_bytes(left, right),
             });
             child.update(size);
+            child.sidebar = self.sidebar;
             self.child = Some(Child::Hex(child));
             return;
         }
@@ -320,6 +354,7 @@ impl FolderApp {
         match App::new(session) {
             Ok(mut child) => {
                 child.update(size);
+                child.sidebar = self.sidebar;
                 self.child = Some(Child::Text(child));
             }
             Err(e) => self.message = Some(e.to_string()),
@@ -343,12 +378,13 @@ pub fn render(app: &FolderApp, frame: &mut Frame) {
         child.render(frame);
         return;
     }
+    let (main, sidebar) = view::split_sidebar(frame.area(), app.sidebar, MIN_LIST_COLS);
     let [header, body, status] = Split::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
-    .areas(frame.area());
+    .areas(main);
     let w = usize::from(header.width);
     let title = format!(
         " {}  ⇄  {}",
@@ -360,8 +396,13 @@ pub fn render(app: &FolderApp, frame: &mut Frame) {
     );
     render_list(app, frame, body);
     render_status(app, frame, status);
+    if let Some(area) = sidebar {
+        view::render_sidebar(frame, area, app.sidebar.dock, ScreenKind::Folder, &|a| {
+            app.command_value(a)
+        });
+    }
     if app.show_help {
-        view::render_help(frame);
+        view::render_help(frame, ScreenKind::Folder);
     }
 }
 
@@ -408,7 +449,7 @@ fn render_status(app: &FolderApp, frame: &mut Frame, area: Rect) {
         )
     });
     let right = format!(
-        "~{} -{} +{} ={}  enter:open ?:help q:quit ",
+        "~{} -{} +{} ={}  enter:open tab:keys ?:help q:quit ",
         s.different,
         s.only_left,
         s.only_right + s.type_mismatch + s.errors,
@@ -567,6 +608,60 @@ mod tests {
         };
         assert_eq!(child.session.left_label, "a/a_changed.txt");
         assert_eq!(child.session.right_label, "b/a_changed.txt");
+    }
+
+    #[test]
+    fn sidebar_state_carries_into_file_and_back() {
+        let mut f = fixture();
+        f.app.update(Action::DockSidebar(crate::app::Dock::Left));
+        f.app.update(Action::Open);
+        let Some(Child::Text(child)) = f.app.child.as_ref() else {
+            panic!("text diff opened")
+        };
+        assert_eq!(
+            child.sidebar, f.app.sidebar,
+            "file view inherits the sidebar"
+        );
+        f.app.update(Action::ToggleSidebar); // hide it inside the file view
+        assert!(
+            f.app.sidebar.open,
+            "the folder's copy is untouched while a file is open"
+        );
+        f.app.update(Action::Back);
+        assert!(f.app.child.is_none());
+        assert!(!f.app.sidebar.open, "hidden in the file view stays hidden");
+        assert_eq!(f.app.sidebar.dock, crate::app::Dock::Left);
+    }
+
+    #[test]
+    fn sidebar_carries_into_hex_view() {
+        let mut f = fixture();
+        f.app.update(Action::ToggleSidebar);
+        f.app.update(Action::Down(3)); // e_bin
+        f.app.update(Action::Open);
+        let Some(Child::Hex(hex)) = f.app.child.as_ref() else {
+            panic!("hex view opened")
+        };
+        assert!(!hex.sidebar.open);
+        f.app.update(Action::ToggleSidebar);
+        f.app.update(Action::Quit);
+        assert!(f.app.sidebar.open);
+    }
+
+    #[test]
+    fn folder_sidebar_lists_folder_commands_with_values() {
+        let mut f = fixture();
+        f.app.update(Action::ToggleSame);
+        f.app.update(Action::Resize {
+            width: 90,
+            height: 24,
+        });
+        let mut t = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        t.draw(|fr| render(&f.app, fr)).unwrap();
+        // The header row holds temp-dir roots; snapshot everything below it.
+        let text = t.backend().to_string();
+        let body: Vec<&str> = text.lines().skip(1).collect();
+        insta::assert_snapshot!(body.join("\n"));
     }
 
     #[test]

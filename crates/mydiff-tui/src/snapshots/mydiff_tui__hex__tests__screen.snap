@@ -1,6 +1,6 @@
 ---
 source: crates/mydiff-tui/src/hex.rs
-expression: t.backend().to_string()
+expression: "screen_at(&app(), 80, 9)"
 ---
 " [binary] a.bin → b.bin                                                         "
 "- 00000000  00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f |................| "
@@ -10,4 +10,4 @@ expression: t.backend().to_string()
 "- 00000030  30 31 32 33 34 35 36 37  38 39 3a 3b 3c 3d 3e 3f |0123456789:;<=>?| "
 "+ 00000030  30 31 32 33 34 35 36 37  38 39 3a 3b 41 3d 3e 3f |0123456789:;A=>?| "
 "                                                                                "
-" sizes 64 vs 64                   2 bytes differ  2 changed rows  ?:help q:quit "
+" sizes 64 vs 64          2 bytes differ  2 changed rows  tab:keys ?:help q:quit "

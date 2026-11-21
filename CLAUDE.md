@@ -114,7 +114,7 @@ Fixture case layouts:
 2. Use it in the core and add rstest cases plus at least one fixture case.
 3. Add a CLI flag in `CompareArgs` and map it in `CompareArgs::to_layer` (`crates/mydiff/src/args.rs`), and extend the `flags_become_option_keys` test.
 4. Document it in `SAMPLE_CONFIG` (`crates/mydiff-core/src/config.rs`). `sample_config_parses_and_equals_defaults` must keep passing.
-5. If it should be toggleable in the TUI, add an `Action`, a key in `keys.rs` (and `HELP`), and handle it in `App::update`.
+5. If it should be toggleable in the TUI, add an `Action`, a key in `keys.rs` plus a `COMMANDS` entry (the sidebar and help are built from it; tests fail if a key is missing), handle it in `App::update`, and give it a live value in `option_value`.
 6. Add a `.trycmd` example and update the README.
 
 ## Conventions
