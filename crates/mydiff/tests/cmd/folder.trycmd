@@ -74,7 +74,8 @@ $ mydiff -f json --include 'changed.txt' left right
     "only_left": 0,
     "only_right": 0,
     "type_mismatch": 0,
-    "errors": 0
+    "errors": 0,
+    "renamed": 0
   },
   "entries": [
     {

@@ -1,0 +1,160 @@
+# AI output
+
+`--ai` (or `MYDIFF_AI=1`, or `-f ai`) prints compact annotated text for
+coding agents and LLM prompts: a summary first, then every line with both
+line numbers and its exact text. It never opens the viewer.
+
+```console
+$ mydiff --ai a.txt b.txt
+? 1
+mydiff-ai v1
+compare: a.txt -> b.txt
+summary: text, +2 -1 lines in 1 hunk
+@@ #1 -1,3 +1,4 @@
+1 1   one
+2   - two
+  2 + 2
+3 3   three
+  4 + four
+
+$ mydiff --ai a.txt a.txt
+mydiff-ai v1
+compare: a.txt -> a.txt
+summary: identical
+
+```
+
+Folders list every changed file first. Lockfiles and minified files are listed
+but not expanded until `--include` names them.
+
+```console
+$ mydiff --ai left right
+? 1
+mydiff-ai v1
+compare: left -> right
+summary: 4 files changed: 2 modified, 1 added, 1 deleted; +5 -3 lines
+files:
+  M Cargo.lock +1 -1 (lockfile; collapsed)
+  A docs/guide.md +1
+  D gone.txt -1
+  M src/main.rs +3 -1
+
+=== A docs/guide.md
+@@ docs/guide.md#1 -0,0 +1,1 @@
+  1 + # Guide
+
+=== D gone.txt
+@@ gone.txt#1 -1,1 +0,0 @@
+1   - old
+
+=== M src/main.rs
+@@ src/main.rs#1 -1,1 +1,3 @@
+1   - fn main() {}
+  1 + fn main() {
+  2 +     run();
+  3 + }
+
+$ mydiff --ai --include Cargo.lock left right
+? 1
+mydiff-ai v1
+compare: left -> right
+summary: 1 file changed: 1 modified; +1 -1 lines
+files:
+  M Cargo.lock +1 -1
+
+=== M Cargo.lock
+@@ Cargo.lock#1 -1,1 +1,1 @@
+1   - v = 1
+  1 + v = 2
+
+```
+
+Output stops at a line budget (`--budget`, `MYDIFF_AI_BUDGET`, default 2000)
+and says what it left out. `--hunk <id>` shows just those hunks, in full;
+`--budget` and `--hunk` imply `--ai`.
+
+```console
+$ mydiff --budget 14 long_a.txt long_b.txt
+? 1
+mydiff-ai v1
+compare: long_a.txt -> long_b.txt
+summary: text, +3 -3 lines in 3 hunks
+@@ #1 -2,7 +2,7 @@
+2 2   line 2
+3 3   line 3
+4 4   line 4
+5   - line 5
+  5 + LINE 5
+6 6   line 6
+7 7   line 7
+8 8   line 8
+
+truncated: 14-line budget reached; not shown: #2 to #3
+more: rerun with --hunk #2, or --budget 0 for everything
+
+$ mydiff --hunk 2 --hunk 9 long_a.txt long_b.txt
+? 1
+mydiff-ai v1
+compare: long_a.txt -> long_b.txt
+summary: text, +3 -3 lines in 3 hunks
+@@ #2 -17,7 +17,7 @@
+17 17   line 17
+18 18   line 18
+19 19   line 19
+20    - line 20
+   20 + LINE 20
+21 21   line 21
+22 22   line 22
+23 23   line 23
+not found: --hunk 9
+
+```
+
+JSON, YAML and CSV are compared by path.
+
+```console
+$ mydiff --ai a.json b.json
+? 1
+mydiff-ai v1
+compare: a.json -> b.json
+summary: json, 1 added, 0 removed, 1 changed
+~ $.port: 80 → 8080
++ $.tls: true
+
+```
+
+`--ai-help` prints the format, for an agent's instructions.
+
+```console
+$ mydiff --ai-help
+mydiff AI output (`mydiff --ai A B`, or set MYDIFF_AI=1)
+
+Read-only, never interactive, no color. Exit status: 0 identical, 1 different, 2 error.
+Works for files, folders and git: `mydiff --ai git show [<commit>]`,
+`mydiff --ai git diff [--staged] [<rev>...]`.
+
+Layout:
+  mydiff-ai v1                      format version
+  compare: <left> -> <right>
+  summary: <what changed, in counts>
+  files:                            (folders and git only)
+    <S> <path> [+added -removed] [(tags)]
+  === <S> <path>                    one section per file with content to show
+  @@ <id> -<start>,<count> +<start>,<count> @@
+  <left no> <right no> <marker> <text>
+
+S (file status): M modified, A added, D deleted, R renamed (`old -> new`),
+  T file vs directory, B binary, ? unreadable.
+marker: ' ' unchanged, '-' left only, '+' right only, '.' ignored by options.
+  A changed line is a '-' line followed by a '+' line. Text is exact.
+Tags: (whitespace only), (content unchanged), (lockfile|minified; collapsed).
+<id> is <path>#<n> (just #<n> for two files); pass it to --hunk.
+
+Budget: output stops after MYDIFF_AI_BUDGET lines (default 2000) and ends
+with a `truncated:` line naming what was left out. To see more, rerun with
+  --hunk <id>        those hunks only, in full (repeatable)
+  --include <path>   only matching files; collapsed files are then expanded
+  --budget <n>       another limit; 0 = no limit
+Comparison options work too: -w (ignore whitespace), -U <n> (context lines).
+
+```

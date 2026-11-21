@@ -210,6 +210,9 @@ pub struct App {
     pub current_change: Option<usize>,
     pub top: usize,
     pub hscroll: usize,
+    /// Display width of the widest line on either side, tabs expanded.
+    /// Bounds `hscroll`: scrolling right stops once that line's end is visible.
+    pub widest: usize,
     /// Body height in rows.
     pub viewport: usize,
     pub width: u16,
@@ -260,6 +263,14 @@ pub struct Typing {
 impl App {
     pub fn new(session: TextSession) -> Result<Self> {
         let diff = diff_text(&session.left, &session.right, &session.options)?;
+        let widest = diff
+            .rows
+            .iter()
+            .flat_map(|r| [r.left.as_ref(), r.right.as_ref()])
+            .flatten()
+            .map(|l| width(&sanitize(&l.text, 0)))
+            .max()
+            .unwrap_or(0);
         let mut app = Self {
             session,
             diff,
@@ -269,6 +280,7 @@ impl App {
             current_change: None,
             top: 0,
             hscroll: 0,
+            widest,
             viewport: 20,
             width: 80,
             show_help: false,
@@ -294,6 +306,17 @@ impl App {
     }
 
     pub fn update(&mut self, action: Action) {
+        self.apply(action);
+        // Layout, sidebar and terminal width all change how much text fits.
+        self.hscroll = self.hscroll.min(self.max_hscroll());
+    }
+
+    /// Furthest right the view can scroll: the widest line's end at the right edge.
+    pub fn max_hscroll(&self) -> usize {
+        self.widest.saturating_sub(crate::view::text_width(self))
+    }
+
+    fn apply(&mut self, action: Action) {
         if !matches!(action, Action::Resize { .. }) {
             self.message = None;
         }
@@ -1286,7 +1309,11 @@ mod tests {
         });
         let cols = crate::view::text_width(&app);
         search(&mut app, "needle");
-        assert_eq!(app.hscroll, 200 - cols / 2);
+        assert_eq!(
+            app.hscroll,
+            206 - cols,
+            "centring would scroll past the line end, so the end sits at the right edge"
+        );
         search(&mut app, "^x");
         assert_eq!(
             app.hscroll, 0,
@@ -1307,12 +1334,85 @@ mod tests {
         assert_eq!(app.focus, Pane::Left);
     }
 
+    /// One `width`-column line on the left, short lines elsewhere, in a 80x12 terminal.
+    fn wide_app(left_line: &str) -> App {
+        let mut app = App::new(session(&format!("{left_line}\nb\n"), "a\nb\n")).unwrap();
+        app.update(Action::Resize {
+            width: 80,
+            height: 12,
+        });
+        app
+    }
+
+    fn scroll_right_until_stuck(app: &mut App) {
+        for _ in 0..100 {
+            app.update(Action::ScrollRight);
+        }
+    }
+
     #[test]
     fn horizontal_scroll_never_negative() {
-        let mut app = long_app(10);
+        let mut app = wide_app(&"x".repeat(300));
         app.update(Action::ScrollLeft);
         assert_eq!(app.hscroll, 0);
         app.update(Action::ScrollRight);
         assert_eq!(app.hscroll, HSCROLL_STEP);
+    }
+
+    #[test]
+    fn right_scroll_stops_when_the_widest_line_ends_at_the_edge() {
+        let mut app = wide_app(&"x".repeat(300));
+        let cols = crate::view::text_width(&app);
+        scroll_right_until_stuck(&mut app);
+        assert_eq!(app.hscroll, 300 - cols);
+        app.update(Action::ScrollLeft);
+        assert_eq!(app.hscroll, 300 - cols - HSCROLL_STEP);
+    }
+
+    #[test]
+    fn lines_that_fit_do_not_scroll_right() {
+        let mut app = long_app(10);
+        app.update(Action::ScrollRight);
+        assert_eq!(app.hscroll, 0);
+    }
+
+    #[rstest::rstest]
+    #[case::tabs_expand_to_four_columns("\t".repeat(50), 200)]
+    #[case::wide_characters_take_two_columns("日".repeat(100), 200)]
+    fn right_scroll_limit_uses_display_width(#[case] line: String, #[case] cols: usize) {
+        let mut app = wide_app(&line);
+        assert_eq!(app.widest, cols);
+        scroll_right_until_stuck(&mut app);
+        assert_eq!(app.hscroll, cols - crate::view::text_width(&app));
+    }
+
+    #[test]
+    fn right_side_lines_count_too() {
+        let mut app = App::new(session("a\n", &format!("{}\n", "y".repeat(300)))).unwrap();
+        app.update(Action::Resize {
+            width: 80,
+            height: 12,
+        });
+        scroll_right_until_stuck(&mut app);
+        assert_eq!(app.hscroll, 300 - crate::view::text_width(&app));
+    }
+
+    #[rstest::rstest]
+    #[case::wider_terminal(Action::Resize { width: 250, height: 12 })]
+    #[case::inline_layout_is_wider(Action::ToggleLayout)]
+    #[case::closing_the_sidebar(Action::ToggleSidebar)]
+    fn more_room_pulls_the_view_back_to_the_line_end(#[case] action: Action) {
+        let mut app = wide_app(&"x".repeat(150));
+        // Wide enough that the sidebar takes room from the text.
+        app.update(Action::Resize {
+            width: 120,
+            height: 12,
+        });
+        scroll_right_until_stuck(&mut app);
+        let before = app.hscroll;
+        app.update(action);
+        let cols = crate::view::text_width(&app);
+        assert_eq!(app.hscroll, 150usize.saturating_sub(cols));
+        assert!(app.hscroll < before, "{before} -> {}", app.hscroll);
     }
 }

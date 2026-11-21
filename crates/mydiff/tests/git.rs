@@ -61,7 +61,11 @@ impl Repo {
         c.args(args).current_dir(&self.dir);
         for (k, _) in std::env::vars_os() {
             let k = k.to_string_lossy().into_owned();
-            if k.starts_with("GIT_") || k == "NO_COLOR" || k == "CLICOLOR_FORCE" {
+            if k.starts_with("GIT_")
+                || k.starts_with("MYDIFF_")
+                || k == "NO_COLOR"
+                || k == "CLICOLOR_FORCE"
+            {
                 c.env_remove(k);
             }
         }
@@ -195,4 +199,312 @@ fn external_diff_colors_when_git_uses_a_pager() {
     };
     assert!(run(true).contains("\x1b["), "colored for git's pager");
     assert!(!run(false).contains("\x1b["), "plain when piped elsewhere");
+}
+
+impl Repo {
+    /// Run mydiff in the repository; any exit status.
+    fn mydiff(&self, args: &[&str]) -> Output {
+        self.cmd(BIN, args).env("NO_COLOR", "1").output().unwrap()
+    }
+
+    /// Commit what `new()` staged: HEAD is then the commit with every kind of change.
+    fn committed() -> Self {
+        let repo = Self::new();
+        repo.git(&["commit", "-q", "-m", "change everything"]);
+        repo
+    }
+}
+
+fn status_and_stdout(out: &Output) -> (Option<i32>, String) {
+    (out.status.code(), stdout(out))
+}
+
+#[test]
+fn git_show_lists_every_file_of_the_commit_with_renames_paired() {
+    let repo = Repo::committed();
+    let (code, text) = status_and_stdout(&repo.mydiff(&["git", "show", "-f", "summary"]));
+    assert_eq!(code, Some(1));
+    insta::assert_snapshot!(text, @"
+    ~ conf.yaml
+    ~ data.json
+    ~ f.txt
+    ~ my notes.txt
+    + n.txt
+    - old.json
+    ~ sub/s.txt -> sub/u.txt
+    HEAD^ vs HEAD: 5 different, 1 only in left, 1 only in right, 1 renamed (0 same)
+    ");
+}
+
+#[test]
+fn git_show_piped_prints_a_patch_per_file() {
+    let repo = Repo::committed();
+    let (code, text) = status_and_stdout(&repo.mydiff(&["git", "show"]));
+    assert_eq!(code, Some(1));
+    insta::assert_snapshot!(text, @r#"
+    --- HEAD^/conf.yaml
+    +++ HEAD/conf.yaml
+    @@ -1,2 +1,2 @@
+    +port: 8080
+     name: web
+    -port: 80
+    --- HEAD^/data.json
+    +++ HEAD/data.json
+    @@ -1,1 +1,1 @@
+    -{"ok": 1}
+    +{"ok": 
+    --- HEAD^/f.txt
+    +++ HEAD/f.txt
+    @@ -1,3 +1,3 @@
+     alpha
+    -beta
+    +beta changed
+     gamma
+    --- HEAD^/my notes.txt
+    +++ HEAD/my notes.txt
+    @@ -1,1 +1,1 @@
+    -draft
+    +final
+    --- /dev/null
+    +++ HEAD/n.txt
+    @@ -0,0 +1,1 @@
+    +new file
+    --- HEAD^/old.json
+    +++ /dev/null
+    @@ -1,1 +0,0 @@
+    -{"gone": true}
+    --- HEAD^/sub/s.txt
+    +++ HEAD/sub/u.txt
+    @@ -2,3 +2,4 @@
+     two
+     three
+     four
+    +five
+    "#);
+}
+
+#[test]
+fn git_show_json_names_the_old_path_of_a_rename() {
+    let repo = Repo::committed();
+    let out = repo.mydiff(&["git", "show", "-f", "json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["left"], "HEAD^");
+    assert_eq!(v["right"], "HEAD");
+    let renamed: Vec<_> = v["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e.get("renamed_from").is_some())
+        .map(|e| format!("{} -> {} ({})", e["renamed_from"], e["path"], e["status"]))
+        .collect();
+    assert_eq!(renamed, [r#""sub/s.txt" -> "sub/u.txt" ("different")"#]);
+    assert_eq!(v["stats"]["renamed"], 1);
+}
+
+#[test]
+fn git_show_of_the_root_commit_adds_every_file() {
+    let repo = Repo::committed();
+    let (code, text) = status_and_stdout(&repo.mydiff(&["git", "show", "HEAD~1", "-f", "summary"]));
+    assert_eq!(code, Some(1));
+    insta::assert_snapshot!(text, @"
+    + conf.yaml
+    + data.json
+    + f.txt
+    + my notes.txt
+    + old.json
+    + sub/s.txt
+    (empty) vs HEAD~1: 6 only in right (0 same)
+    ");
+}
+
+#[test]
+fn git_show_limits_to_paths_after_double_dash() {
+    let repo = Repo::committed();
+    let (_, text) = status_and_stdout(&repo.mydiff(&["git", "show", "-f", "summary", "--", "sub"]));
+    insta::assert_snapshot!(text, @"
+    ~ sub/s.txt -> sub/u.txt
+    HEAD^ vs HEAD: 1 different, 1 renamed (0 same)
+    ");
+}
+
+#[test]
+fn git_diff_forms_select_the_same_changes_as_git_diff() {
+    let repo = Repo::new();
+    let summary = |args: &[&str]| {
+        let mut all = vec!["git", "diff", "-f", "summary"];
+        all.extend(args);
+        let out = repo.mydiff(&all);
+        assert!(
+            out.status.code() != Some(2),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stdout(&out)
+    };
+    let staged = summary(&["--staged"]);
+    assert!(
+        staged.ends_with(
+            "HEAD vs index: 5 different, 1 only in left, 1 only in right, 1 renamed (0 same)\n"
+        ),
+        "{staged}"
+    );
+    assert_eq!(summary(&["--cached"]), staged);
+    assert_eq!(
+        summary(&[]),
+        "index vs worktree: identical (0 same)\n",
+        "everything is staged"
+    );
+    repo.write("f.txt", "unstaged edit\n");
+    insta::assert_snapshot!(summary(&[]), @"
+    ~ f.txt
+    index vs worktree: 1 different (0 same)
+    ");
+    repo.git(&["commit", "-q", "-m", "c2"]);
+    let show = repo.mydiff(&["git", "show", "-f", "summary"]);
+    let body = |s: &str| {
+        s.lines()
+            .filter(|l| !l.contains(" vs "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    for range in [
+        &["HEAD~1", "HEAD"][..],
+        &["HEAD~1..HEAD"],
+        &["HEAD~1...HEAD"],
+    ] {
+        assert_eq!(body(&summary(range)), body(&stdout(&show)), "{range:?}");
+    }
+    assert!(summary(&["HEAD~1...HEAD"]).contains(" vs HEAD:"));
+}
+
+#[test]
+fn git_diff_reads_the_work_tree_side_from_disk() {
+    let repo = Repo::committed();
+    repo.write("f.txt", "alpha\nbeta changed\ngamma\ndelta\n");
+    let (code, text) = status_and_stdout(&repo.mydiff(&["git", "diff"]));
+    assert_eq!(code, Some(1));
+    insta::assert_snapshot!(text, @"
+    --- index/f.txt
+    +++ worktree/f.txt
+    @@ -1,3 +1,4 @@
+     alpha
+     beta changed
+     gamma
+    +delta
+    ");
+}
+
+#[test]
+fn git_diff_without_changes_exits_zero() {
+    let repo = Repo::committed();
+    let (code, text) = status_and_stdout(&repo.mydiff(&["git", "diff"]));
+    assert_eq!((code, text.as_str()), (Some(0), ""));
+}
+
+#[test]
+fn git_show_and_diff_report_errors() {
+    let repo = Repo::committed();
+    let err = |args: &[&str], dir: &Path| {
+        let out = repo.cmd(BIN, args).current_dir(dir).output().unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let msg = err(&["git", "show", "nope"], &repo.dir);
+    assert!(msg.contains("nope is not a commit"), "{msg}");
+    let msg = err(&["git", "diff", "--staged", "a", "b"], &repo.dir);
+    assert!(msg.contains("at most one revision"), "{msg}");
+    let outside = repo.home.path();
+    let msg = err(&["git", "show"], outside);
+    assert!(msg.contains("not a git repository"), "{msg}");
+    let msg = err(&["git", "show", "--ignore", "("], &repo.dir);
+    assert!(msg.contains("regex"), "options are checked first: {msg}");
+}
+
+#[test]
+fn agents_get_ai_output_for_a_commit_from_the_environment() {
+    let repo = Repo::committed();
+    let out = repo
+        .cmd(BIN, &["git", "show"])
+        .env("MYDIFF_AI", "1")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    insta::assert_snapshot!(stdout(&out), @r#"
+    mydiff-ai v1
+    compare: HEAD^ -> HEAD
+    summary: 7 files changed: 4 modified, 1 added, 1 deleted, 1 renamed; +6 -5 lines
+    files:
+      M conf.yaml +1 -1
+      M data.json +1 -1
+      M f.txt +1 -1
+      M my notes.txt +1 -1
+      A n.txt +1
+      D old.json -1
+      R sub/s.txt -> sub/u.txt +1
+
+    === M conf.yaml
+    @@ conf.yaml#1 -1,2 +1,2 @@
+      1 + port: 8080
+    1 2   name: web
+    2   - port: 80
+
+    === M data.json
+    @@ data.json#1 -1,1 +1,1 @@
+    1   - {"ok": 1}
+      1 + {"ok": 
+
+    === M f.txt
+    @@ f.txt#1 -1,3 +1,3 @@
+    1 1   alpha
+    2   - beta
+      2 + beta changed
+    3 3   gamma
+
+    === M my notes.txt
+    @@ my notes.txt#1 -1,1 +1,1 @@
+    1   - draft
+      1 + final
+
+    === A n.txt
+    @@ n.txt#1 -0,0 +1,1 @@
+      1 + new file
+
+    === D old.json
+    @@ old.json#1 -1,1 +0,0 @@
+    1   - {"gone": true}
+
+    === R sub/s.txt -> sub/u.txt
+    @@ sub/u.txt#1 -2,3 +2,4 @@
+    2 2   two
+    3 3   three
+    4 4   four
+      5 + five
+    "#);
+    let out = repo
+        .cmd(BIN, &["git", "show", "--hunk", "sub/u.txt#1"])
+        .env("MYDIFF_AI_BUDGET", "3")
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&out).ends_with(
+            "@@ sub/u.txt#1 -2,3 +2,4 @@\n2 2   two\n3 3   three\n4 4   four\n  5 + five\n"
+        ),
+        "an asked-for hunk is shown in full whatever the budget:\n{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn git_external_diff_ignores_mydiff_ai_so_git_diff_stays_a_patch() {
+    let repo = Repo::new();
+    let out = repo
+        .cmd("git", &["diff", "--cached"])
+        .env("GIT_EXTERNAL_DIFF", "mydiff git external")
+        .env("MYDIFF_AI", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    let text = stdout(&out);
+    assert!(text.starts_with("diff --git "), "{text}");
+    assert!(!text.contains("mydiff-ai"), "{text}");
 }

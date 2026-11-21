@@ -10,6 +10,9 @@
 //!   `.gitignore`. Excluded directories are not descended into.
 //! * With include/exclude filters active, directories are listed only if they
 //!   contain at least one compared file.
+//! * [`Roots::ChangedFiles`] roots hold only the files a git commit or diff
+//!   touched. Every file is then its own entry (no directory collapsing), and
+//!   renames pair a left path with a different right path.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -62,13 +65,78 @@ impl EntryStatus {
 /// One compared path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FolderEntry {
-    /// Path relative to the compared roots, `/`-separated.
+    /// Path relative to the compared roots, `/`-separated (the right-hand path
+    /// of a rename).
     pub path: String,
     /// `true` if this is a directory (only reported when on one side only).
     pub is_dir: bool,
-    /// Comparison result.
+    /// Comparison result. For a rename, of the left file at `renamed_from`
+    /// with the right file at `path`.
     #[serde(flatten)]
     pub status: EntryStatus,
+    /// Left-hand path when the file was renamed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
+}
+
+/// Marker of a rename whose content is unchanged.
+pub const RENAMED_MARKER: char = '>';
+
+impl FolderEntry {
+    /// A path that is the same on both sides.
+    pub fn new(path: impl Into<String>, is_dir: bool, status: EntryStatus) -> Self {
+        Self {
+            path: path.into(),
+            is_dir,
+            status,
+            renamed_from: None,
+        }
+    }
+
+    /// Is this a difference? A rename is one even when the content is the same.
+    pub fn is_change(&self) -> bool {
+        self.status.is_change() || self.renamed_from.is_some()
+    }
+
+    /// The status marker, or [`RENAMED_MARKER`] for a rename with equal content.
+    pub fn marker(&self) -> char {
+        match (&self.status, &self.renamed_from) {
+            (EntryStatus::Same, Some(_)) => RENAMED_MARKER,
+            (s, _) => s.marker(),
+        }
+    }
+
+    /// Path relative to the left root.
+    pub fn left_path(&self) -> &str {
+        self.renamed_from.as_deref().unwrap_or(&self.path)
+    }
+
+    /// `path`, `dir/` or `old -> new`.
+    pub fn display_path(&self) -> String {
+        match &self.renamed_from {
+            Some(from) => format!("{from} -> {}", self.path),
+            None if self.is_dir => format!("{}/", self.path),
+            None => self.path.clone(),
+        }
+    }
+}
+
+/// A file at `from` on the left and at `to` on the right.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rename {
+    pub from: String,
+    pub to: String,
+}
+
+/// What two compared roots hold.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Roots {
+    /// Two directory trees: a directory on one side only is a single entry.
+    #[default]
+    Trees,
+    /// Only the files a git commit or diff changed. Every file is listed by
+    /// its full path, and these renames are paired into single entries.
+    ChangedFiles(Vec<Rename>),
 }
 
 /// Counts per status.
@@ -80,6 +148,8 @@ pub struct FolderStats {
     pub only_right: usize,
     pub type_mismatch: usize,
     pub errors: usize,
+    /// Renames, also counted under their content status (`same` or `different`).
+    pub renamed: usize,
 }
 
 /// Full folder comparison result, sorted by path.
@@ -90,7 +160,7 @@ pub struct FolderDiff {
 
 impl FolderDiff {
     pub fn is_identical(&self) -> bool {
-        !self.entries.iter().any(|e| e.status.is_change())
+        !self.entries.iter().any(FolderEntry::is_change)
     }
 
     pub fn stats(&self) -> FolderStats {
@@ -104,16 +174,17 @@ impl FolderDiff {
                 EntryStatus::TypeMismatch => s.type_mismatch += 1,
                 EntryStatus::Error(_) => s.errors += 1,
             }
+            s.renamed += usize::from(e.renamed_from.is_some());
         }
         s
     }
 
-    /// Stable text form used by snapshot tests: `<marker> <path>[/]`.
+    /// Stable text form used by snapshot tests: `<marker> <path>[/]`, or
+    /// `<marker> <old> -> <new>` for a rename.
     pub fn render_review(&self) -> String {
         let mut out = String::new();
         for e in &self.entries {
-            let slash = if e.is_dir { "/" } else { "" };
-            out.push_str(&format!("{} {}{slash}", e.status.marker(), e.path));
+            out.push_str(&format!("{} {}", e.marker(), e.display_path()));
             if let EntryStatus::Error(msg) = &e.status {
                 out.push_str(&format!("  ({msg})"));
             }
@@ -256,6 +327,62 @@ pub fn diff_folders(left: &Path, right: &Path, opts: &DiffOptions) -> Result<Fol
     }))
 }
 
+/// Compare two roots holding what `roots` says they hold.
+pub fn diff_roots(
+    left: &Path,
+    right: &Path,
+    roots: &Roots,
+    opts: &DiffOptions,
+) -> Result<FolderDiff> {
+    let Roots::ChangedFiles(renames) = roots else {
+        return diff_folders(left, right, opts);
+    };
+    let filter = PathFilter::new(opts)?;
+    let files = |root: &Path| -> Result<BTreeMap<String, NodeKind>> {
+        let mut l = list_dir(root, &filter)?;
+        l.retain(|_, k| *k == NodeKind::File);
+        Ok(l)
+    };
+    let read = |side: &Path, rel: &str| -> std::result::Result<Vec<u8>, String> {
+        std::fs::read(side.join(rel)).map_err(|e| e.to_string())
+    };
+    let same = |from: &str, to: &str| Ok(files_equal(&read(left, from)?, &read(right, to)?, opts));
+    let diff = compare_listings(&files(left)?, &files(right)?, |rel| same(rel, rel));
+    Ok(pair_renames(diff, renames, same))
+}
+
+/// Merge the `- from` and `+ to` entries of each rename into one entry at `to`,
+/// compared with `same_content(from, to)`. Renames whose two sides are not both
+/// listed (filtered out, say) are left alone.
+pub fn pair_renames(
+    mut diff: FolderDiff,
+    renames: &[Rename],
+    mut same_content: impl FnMut(&str, &str) -> std::result::Result<bool, String>,
+) -> FolderDiff {
+    let find = |entries: &[FolderEntry], path: &str, status: &EntryStatus| {
+        entries
+            .iter()
+            .position(|e| e.path == path && !e.is_dir && e.status == *status)
+    };
+    for r in renames {
+        let (Some(from), Some(_)) = (
+            find(&diff.entries, &r.from, &EntryStatus::OnlyLeft),
+            find(&diff.entries, &r.to, &EntryStatus::OnlyRight),
+        ) else {
+            continue;
+        };
+        diff.entries.remove(from);
+        let to = find(&diff.entries, &r.to, &EntryStatus::OnlyRight).expect("still listed");
+        diff.entries[to].status = match same_content(&r.from, &r.to) {
+            Ok(true) => EntryStatus::Same,
+            Ok(false) => EntryStatus::Different,
+            Err(msg) => EntryStatus::Error(msg),
+        };
+        diff.entries[to].renamed_from = Some(r.from.clone());
+    }
+    diff
+}
+
 /// Are two files equal: identical bytes, or both text and equal under `opts`?
 pub fn files_equal(a: &[u8], b: &[u8], opts: &DiffOptions) -> bool {
     if a == b {
@@ -304,11 +431,7 @@ pub fn compare_listings(
         if is_dir || status == EntryStatus::TypeMismatch {
             skip_under = Some(format!("{path}/"));
         }
-        entries.push(FolderEntry {
-            path: path.clone(),
-            is_dir,
-            status,
-        });
+        entries.push(FolderEntry::new(path.clone(), is_dir, status));
     }
     FolderDiff { entries }
 }
@@ -490,5 +613,112 @@ mod tests {
         };
         let d = diff_folders(l.path(), r.path(), &opts).unwrap();
         assert_eq!(d.render_review(), "  a.rs\n+ src/\n");
+    }
+
+    fn rename(from: &str, to: &str) -> Rename {
+        Rename {
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    #[rstest]
+    #[case::pure_rename("x", "> a/old.txt -> b/new.txt\n")]
+    #[case::rename_with_edits("edited", "~ a/old.txt -> b/new.txt\n")]
+    #[case::unreadable_side("denied", "? a/old.txt -> b/new.txt  (denied)\n")]
+    fn renames_become_one_entry(#[case] content: &str, #[case] expected: &str) {
+        let l = listing(&[("a/old.txt", F)]);
+        let r = listing(&[("b/new.txt", F)]);
+        let diff = compare_listings(&l, &r, |_| Ok(true));
+        let mut asked = Vec::new();
+        let d = pair_renames(diff, &[rename("a/old.txt", "b/new.txt")], |from, to| {
+            asked.push((from.to_owned(), to.to_owned()));
+            match content {
+                "x" => Ok(true),
+                "edited" => Ok(false),
+                _ => Err("denied".into()),
+            }
+        });
+        assert_eq!(d.render_review(), expected);
+        assert_eq!(asked, [("a/old.txt".to_owned(), "b/new.txt".to_owned())]);
+        assert!(
+            !d.is_identical(),
+            "a rename is a change even with equal content"
+        );
+        assert_eq!(d.stats().renamed, 1);
+        assert_eq!(d.entries[0].left_path(), "a/old.txt");
+    }
+
+    #[test]
+    fn rename_keeps_sorted_order_by_new_path() {
+        let l = listing(&[("a", F), ("z_old", F)]);
+        let r = listing(&[("a", F), ("b_new", F), ("c", F)]);
+        let diff = compare_listings(&l, &r, |_| Ok(false));
+        let d = pair_renames(diff, &[rename("z_old", "b_new")], |_, _| Ok(true));
+        assert_eq!(d.render_review(), "~ a\n> z_old -> b_new\n+ c\n");
+    }
+
+    #[rstest]
+    #[case::missing_left(&[], &[("new", F)])]
+    #[case::missing_right(&[("old", F)], &[])]
+    #[case::directory_not_file(&[("old", D)], &[("new", F)])]
+    fn renames_without_both_files_are_left_alone(
+        #[case] l: &[(&str, NodeKind)],
+        #[case] r: &[(&str, NodeKind)],
+    ) {
+        let diff = compare_listings(&listing(l), &listing(r), |_| Ok(true));
+        let before = diff.render_review();
+        let d = pair_renames(diff, &[rename("old", "new")], |_, _| panic!("not compared"));
+        assert_eq!(d.render_review(), before);
+    }
+
+    #[test]
+    fn changed_files_list_every_file_and_pair_renames() {
+        let l = tempfile::tempdir().unwrap();
+        let r = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(l.path(), "src/lib.rs", "old\n");
+        write(r.path(), "src/lib.rs", "new\n");
+        write(r.path(), "docs/guide/a.md", "a\n");
+        write(r.path(), "docs/guide/b.md", "b\n");
+        write(l.path(), "gone/x.txt", "x\n");
+        write(l.path(), "util.rs", "u\n");
+        write(r.path(), "src/util.rs", "u\n");
+        write(l.path(), "notes.txt", "a  b\n");
+        write(r.path(), "docs/notes.txt", "a b\n");
+        let roots = Roots::ChangedFiles(vec![
+            rename("util.rs", "src/util.rs"),
+            rename("notes.txt", "docs/notes.txt"),
+        ]);
+        let opts = DiffOptions::default();
+        let d = diff_roots(l.path(), r.path(), &roots, &opts).unwrap();
+        insta::assert_snapshot!(d.render_review(), @r"
+        + docs/guide/a.md
+        + docs/guide/b.md
+        ~ notes.txt -> docs/notes.txt
+        - gone/x.txt
+        ~ src/lib.rs
+        > util.rs -> src/util.rs
+        ");
+        let ws = DiffOptions {
+            whitespace: crate::WhitespaceMode::All,
+            ..DiffOptions::default()
+        };
+        let d = diff_roots(l.path(), r.path(), &roots, &ws).unwrap();
+        assert_eq!(
+            d.entries[2].display_path(),
+            "notes.txt -> docs/notes.txt",
+            "text options apply to renamed files too"
+        );
+        assert_eq!(d.entries[2].marker(), RENAMED_MARKER);
+        let trees = diff_roots(l.path(), r.path(), &Roots::Trees, &opts).unwrap();
+        assert!(
+            trees.render_review().contains("+ docs/\n"),
+            "plain trees still collapse one-sided directories"
+        );
     }
 }

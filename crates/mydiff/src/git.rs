@@ -1,4 +1,4 @@
-//! Git entry points: `mydiff git setup | difftool | external`.
+//! Git entry points: `mydiff git setup | difftool | external | show | diff`.
 //!
 //! Git hands external tools temp files (`/tmp/git-blob-XXXX/name`) and uses
 //! `/dev/null` for a missing side. These adapters turn that into a [`Job`]
@@ -8,8 +8,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
+use mydiff_core::folder::Roots;
+
 use crate::app::{self, Caller, Job, Outcome};
 use crate::args::{GitCommand, RunArgs};
+use crate::settings;
+
+mod changes;
 
 /// Printed by `mydiff git setup`; meant to be appended to `~/.gitconfig`.
 /// It is also what the end-to-end tests install, so it is known to work.
@@ -18,6 +23,9 @@ pub const GITCONFIG: &str = r#"# mydiff as git's diff viewer. Add it to your git
 #
 #   git difftool [<commit>] [-- <path>]   each changed file in the viewer
 #   git difftool -d [<commit>]            all changed files in the folder view
+#
+# Without this config, `mydiff git show [<commit>]` and `mydiff git diff
+# [--staged] [<rev>...]` open every file a commit or diff changed at once.
 [diff]
 	tool = mydiff
 [difftool]
@@ -56,7 +64,33 @@ pub fn run(cmd: GitCommand) -> Result<Outcome> {
             // status, so differences are not reported through the exit code.
             Ok(Outcome::Same)
         }
+        GitCommand::Show { commit, paths, run } => {
+            changed(|| changes::show_spec(commit.as_deref()), &paths, &run)
+        }
+        GitCommand::Diff {
+            staged,
+            revs,
+            paths,
+            run,
+        } => changed(
+            || changes::diff_spec(staged, &revs, changes::merge_base_label),
+            &paths,
+            &run,
+        ),
     }
+}
+
+/// Open the files that a git commit or diff changed in the folder view.
+fn changed(
+    spec: impl FnOnce() -> Result<changes::Spec>,
+    paths: &[String],
+    run: &RunArgs,
+) -> Result<Outcome> {
+    // Bad options and "not a git repository" fail before anything is written.
+    settings::load_options(&run.config, &run.compare)?;
+    let top = changes::toplevel()?;
+    let (_dir, job) = changes::job(&top, spec()?, paths)?;
+    compare(job, run)
 }
 
 fn compare(job: Job, run: &RunArgs) -> Result<Outcome> {
@@ -91,6 +125,7 @@ pub fn difftool_job(local: PathBuf, remote: PathBuf, merged: Option<&str>) -> Jo
         labels,
         preamble: None,
         caller: Caller::GitDifftool,
+        roots: Roots::Trees,
     }
 }
 
@@ -124,6 +159,7 @@ pub fn external_job(args: &[String]) -> Result<Job> {
         labels: [Some(label(old, "a", path)), Some(label(new, "b", new_path))],
         preamble: Some(preamble),
         caller: Caller::GitExternal,
+        roots: Roots::Trees,
     })
 }
 
