@@ -1137,6 +1137,7 @@ dependencies = [
  "insta",
  "mydiff-core",
  "ratatui",
+ "regex",
  "rstest",
  "tempfile",
 ]

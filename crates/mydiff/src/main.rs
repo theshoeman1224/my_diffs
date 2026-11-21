@@ -5,6 +5,7 @@ mod args;
 mod git;
 mod output;
 mod settings;
+mod state;
 
 use std::process::ExitCode;
 

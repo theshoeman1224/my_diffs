@@ -4,7 +4,9 @@ use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 
-use crate::app::{Action, Dock};
+use crate::app::{Action, Pane};
+use crate::cmdline::PromptKey;
+use crate::search::Direction;
 
 /// Lines moved per mouse-wheel notch.
 pub const WHEEL_LINES: usize = 3;
@@ -21,6 +23,7 @@ pub enum ScreenKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Group {
     Navigate,
+    Search,
     Compare,
     View,
     Folder,
@@ -29,8 +32,9 @@ pub enum Group {
 
 impl Group {
     /// Display order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Navigate,
+        Self::Search,
         Self::Compare,
         Self::View,
         Self::Folder,
@@ -40,6 +44,7 @@ impl Group {
     pub fn title(self) -> &'static str {
         match self {
             Self::Navigate => "Navigate",
+            Self::Search => "Search",
             Self::Compare => "Compare",
             Self::View => "View",
             Self::Folder => "Folder",
@@ -71,6 +76,7 @@ const ALL: &[ScreenKind] = &[ScreenKind::Text, ScreenKind::Hex, ScreenKind::Fold
 const TEXT: &[ScreenKind] = &[ScreenKind::Text];
 const TEXT_FOLDER: &[ScreenKind] = &[ScreenKind::Text, ScreenKind::Folder];
 const FOLDER: &[ScreenKind] = &[ScreenKind::Folder];
+const HEX_FOLDER: &[ScreenKind] = &[ScreenKind::Hex, ScreenKind::Folder];
 
 impl Command {
     const fn note(self, note: &'static str) -> Self {
@@ -125,12 +131,21 @@ pub const COMMANDS: &[Command] = &[
         ALL,
     ),
     cmd(
-        "n / p N",
-        "n/p",
+        "]c / [c p",
+        "]c/[c",
         "next / prev change",
         Group::Navigate,
         &[Action::NextChange, Action::PrevChange],
-        ALL,
+        TEXT,
+    ),
+    // No search on these screens, so n / N keep stepping through changes.
+    cmd(
+        "]c n / [c N p",
+        "]c/[c",
+        "next / prev change",
+        Group::Navigate,
+        &[Action::NextChange, Action::PrevChange],
+        HEX_FOLDER,
     ),
     cmd(
         "h ← / l →",
@@ -140,6 +155,40 @@ pub const COMMANDS: &[Command] = &[
         &[Action::ScrollLeft, Action::ScrollRight],
         TEXT,
     ),
+    cmd(
+        "/ ?",
+        "/ ?",
+        "search fwd / back",
+        Group::Search,
+        &[
+            Action::StartSearch(Direction::Forward),
+            Action::StartSearch(Direction::Backward),
+        ],
+        TEXT,
+    )
+    .note(r"\c ignores case"),
+    cmd(
+        "n / N",
+        "n/N",
+        "next / prev match",
+        Group::Search,
+        &[Action::SearchNext, Action::SearchPrev],
+        TEXT,
+    )
+    .note("N goes the opposite way"),
+    cmd(
+        "Tab Ctrl-w w / Ctrl-w h ← / l →",
+        "Tab",
+        "active pane",
+        Group::Search,
+        &[
+            Action::SwitchPane,
+            Action::FocusPane(Pane::Left),
+            Action::FocusPane(Pane::Right),
+        ],
+        TEXT,
+    )
+    .note("searches look only here"),
     cmd(
         "w",
         "w",
@@ -200,32 +249,23 @@ pub const COMMANDS: &[Command] = &[
         FOLDER,
     ),
     cmd(
-        "Tab",
-        "Tab",
+        "F1",
+        "F1",
         "toggle this sidebar",
         Group::General,
         &[Action::ToggleSidebar],
         ALL,
-    ),
+    )
+    .note("remembered between runs"),
     cmd(
-        "Tab then ← / →",
-        "Tab ←/→",
-        "dock left / right",
+        ":",
+        ":",
+        "command line",
         Group::General,
-        &[
-            Action::DockSidebar(Dock::Left),
-            Action::DockSidebar(Dock::Right),
-        ],
+        &[Action::StartCommand],
         ALL,
-    ),
-    cmd(
-        "?",
-        "?",
-        "toggle help",
-        Group::General,
-        &[Action::ToggleHelp],
-        ALL,
-    ),
+    )
+    .note("commands below"),
     cmd(
         "q / Esc",
         "q/Esc",
@@ -234,7 +274,7 @@ pub const COMMANDS: &[Command] = &[
         &[Action::Quit, Action::Back],
         ALL,
     )
-    .note("Esc closes help first"),
+    .note("Esc closes :help first"),
     cmd(
         "Ctrl-c",
         "Ctrl-c",
@@ -252,29 +292,100 @@ pub fn commands(screen: ScreenKind, group: Group) -> impl Iterator<Item = &'stat
         .filter(move |c| c.group == group && c.screens.contains(&screen))
 }
 
-/// Stateful key translation: adds the `Tab` then `←`/`→` sequence (dock the
-/// sidebar) on top of the single-key bindings of [`action_for`].
+/// Whether keys drive the screen or edit the command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputMode {
+    #[default]
+    Normal,
+    /// The `/`, `?` or `:` line is open: keys become [`Action::Prompt`].
+    Prompt,
+}
+
+/// The first key of a two-key sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    /// `Ctrl-w`: then a pane key, as in vim.
+    Window,
+    /// `]` (true) or `[` (false): then `c` jumps to a change, as in vimdiff.
+    Bracket(bool),
+}
+
+/// Stateful key translation: adds the key sequences (`]c` / `[c`, `Ctrl-w`
+/// then a pane key) and the command-line keys on top of the single-key
+/// bindings of [`action_for`].
 #[derive(Debug, Default)]
 pub struct KeyMap {
-    after_tab: bool,
+    pending: Option<Pending>,
 }
 
 impl KeyMap {
-    pub fn action_for(&mut self, event: &Event) -> Option<Action> {
+    pub fn action_for(&mut self, event: &Event, mode: InputMode) -> Option<Action> {
         let Event::Key(key) = event else {
             return action_for(event);
         };
         if key.kind == KeyEventKind::Release {
             return None;
         }
-        let plain = key.modifiers.is_empty();
-        let after_tab = std::mem::replace(&mut self.after_tab, plain && key.code == KeyCode::Tab);
-        match key.code {
-            KeyCode::Left if after_tab && plain => Some(Action::DockSidebar(Dock::Left)),
-            KeyCode::Right if after_tab && plain => Some(Action::DockSidebar(Dock::Right)),
-            _ => key_action(*key),
+        if mode == InputMode::Prompt {
+            self.pending = None;
+            return prompt_action(*key);
         }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match self.pending.take() {
+            Some(Pending::Window) => return window_action(*key),
+            Some(Pending::Bracket(next)) => {
+                return (key.code == KeyCode::Char('c') && !ctrl).then_some(if next {
+                    Action::NextChange
+                } else {
+                    Action::PrevChange
+                });
+            }
+            None => {}
+        }
+        match key.code {
+            KeyCode::Char('w') if ctrl => self.pending = Some(Pending::Window),
+            KeyCode::Char(']') if !ctrl => self.pending = Some(Pending::Bracket(true)),
+            KeyCode::Char('[') if !ctrl => self.pending = Some(Pending::Bracket(false)),
+            _ => {}
+        }
+        key_action(*key)
     }
+}
+
+/// The key after `Ctrl-w`. Vim's window keys; with two panes `w`, `W` and `p`
+/// all mean "the other one". Each also works with Ctrl held (`Ctrl-w Ctrl-w`).
+/// Anything else cancels the sequence.
+fn window_action(key: KeyEvent) -> Option<Action> {
+    Some(match key.code {
+        KeyCode::Char('w' | 'W' | 'p') => Action::SwitchPane,
+        // Many terminals send Ctrl-h as Backspace.
+        KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => Action::FocusPane(Pane::Left),
+        KeyCode::Char('l') | KeyCode::Right => Action::FocusPane(Pane::Right),
+        _ => return None,
+    })
+}
+
+/// Keys while the command line is open.
+fn prompt_action(key: KeyEvent) -> Option<Action> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    Some(Action::Prompt(match key.code {
+        KeyCode::Char('c') if ctrl => return Some(Action::ForceQuit),
+        KeyCode::Char('h') if ctrl => PromptKey::Backspace,
+        KeyCode::Char('w') if ctrl => PromptKey::DeleteWord,
+        KeyCode::Char('u') if ctrl => PromptKey::Clear,
+        KeyCode::Char('p') if ctrl => PromptKey::HistoryPrev,
+        KeyCode::Char('n') if ctrl => PromptKey::HistoryNext,
+        KeyCode::Char('[') if ctrl => PromptKey::Cancel,
+        _ if ctrl || alt => return None,
+        KeyCode::Char(c) => PromptKey::Char(c),
+        KeyCode::Backspace => PromptKey::Backspace,
+        KeyCode::Enter => PromptKey::Submit,
+        KeyCode::Esc => PromptKey::Cancel,
+        KeyCode::Up => PromptKey::HistoryPrev,
+        KeyCode::Down => PromptKey::HistoryNext,
+        _ => return None,
+    }))
 }
 
 /// Single-event bindings (no key sequences; see [`KeyMap`]).
@@ -311,8 +422,12 @@ fn key_action(key: KeyEvent) -> Option<Action> {
         KeyCode::PageUp => Action::PageUp,
         KeyCode::Char('g') | KeyCode::Home => Action::Top,
         KeyCode::Char('G') | KeyCode::End => Action::Bottom,
-        KeyCode::Char('n') => Action::NextChange,
-        KeyCode::Char('p' | 'N') => Action::PrevChange,
+        KeyCode::Char('n') => Action::SearchNext,
+        KeyCode::Char('N') => Action::SearchPrev,
+        KeyCode::Char('p') => Action::PrevChange,
+        KeyCode::Char('/') => Action::StartSearch(Direction::Forward),
+        KeyCode::Char('?') => Action::StartSearch(Direction::Backward),
+        KeyCode::Char(':') => Action::StartCommand,
         KeyCode::Char('h') | KeyCode::Left => Action::ScrollLeft,
         KeyCode::Char('l') | KeyCode::Right => Action::ScrollRight,
         KeyCode::Char('w') => Action::CycleWhitespace,
@@ -320,8 +435,8 @@ fn key_action(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('b') => Action::ToggleBlankLines,
         KeyCode::Char('e') => Action::ToggleLineEndings,
         KeyCode::Char('u') => Action::ToggleLayout,
-        KeyCode::Char('?') => Action::ToggleHelp,
-        KeyCode::Tab => Action::ToggleSidebar,
+        KeyCode::F(1) => Action::ToggleSidebar,
+        KeyCode::Tab => Action::SwitchPane,
         _ => return None,
     })
 }
@@ -360,16 +475,28 @@ mod tests {
     #[case::ctrl_u(KeyCode::Char('u'), CTRL, Some(Action::PageUp))]
     #[case::g(KeyCode::Char('g'), NONE, Some(Action::Top))]
     #[case::shift_g(KeyCode::Char('G'), SHIFT, Some(Action::Bottom))]
-    #[case::n(KeyCode::Char('n'), NONE, Some(Action::NextChange))]
-    #[case::shift_n(KeyCode::Char('N'), SHIFT, Some(Action::PrevChange))]
+    #[case::n_repeats_search(KeyCode::Char('n'), NONE, Some(Action::SearchNext))]
+    #[case::shift_n_repeats_search_backward(KeyCode::Char('N'), SHIFT, Some(Action::SearchPrev))]
+    #[case::p(KeyCode::Char('p'), NONE, Some(Action::PrevChange))]
+    #[case::slash(
+        KeyCode::Char('/'),
+        NONE,
+        Some(Action::StartSearch(Direction::Forward))
+    )]
+    #[case::question_searches_backward(
+        KeyCode::Char('?'),
+        SHIFT,
+        Some(Action::StartSearch(Direction::Backward))
+    )]
+    #[case::colon(KeyCode::Char(':'), SHIFT, Some(Action::StartCommand))]
     #[case::w(KeyCode::Char('w'), NONE, Some(Action::CycleWhitespace))]
     #[case::i(KeyCode::Char('i'), NONE, Some(Action::ToggleCase))]
     #[case::b(KeyCode::Char('b'), NONE, Some(Action::ToggleBlankLines))]
     #[case::ctrl_b_is_page_up(KeyCode::Char('b'), CTRL, Some(Action::PageUp))]
     #[case::e(KeyCode::Char('e'), NONE, Some(Action::ToggleLineEndings))]
     #[case::u(KeyCode::Char('u'), NONE, Some(Action::ToggleLayout))]
-    #[case::help(KeyCode::Char('?'), SHIFT, Some(Action::ToggleHelp))]
-    #[case::tab(KeyCode::Tab, NONE, Some(Action::ToggleSidebar))]
+    #[case::f1_toggles_sidebar(KeyCode::F(1), NONE, Some(Action::ToggleSidebar))]
+    #[case::tab_swaps_panes(KeyCode::Tab, NONE, Some(Action::SwitchPane))]
     #[case::ctrl_tab(KeyCode::Tab, CTRL, None)]
     #[case::unbound(KeyCode::Char('z'), NONE, None)]
     #[case::unbound_ctrl(KeyCode::Char('w'), CTRL, None)]
@@ -377,7 +504,7 @@ mod tests {
         assert_eq!(action_for(&key(code, mods)), expected);
     }
 
-    /// Every action a single key press can produce.
+    /// Every action a single key press, or a two-key sequence, can produce.
     fn bound_actions() -> Vec<Action> {
         let mut codes: Vec<KeyCode> = (' '..='~').map(KeyCode::Char).collect();
         codes.extend([
@@ -399,11 +526,23 @@ mod tests {
         ]);
         codes.extend((1..=12).map(KeyCode::F));
         let mut out = Vec::new();
+        let mut add = |a: Option<Action>| match a {
+            Some(a) if !out.contains(&a) => out.push(a),
+            _ => {}
+        };
+        let prefixes = [
+            None,
+            Some(key(KeyCode::Char('w'), CTRL)),
+            Some(key(KeyCode::Char(']'), NONE)),
+            Some(key(KeyCode::Char('['), NONE)),
+        ];
         for code in codes {
             for mods in [NONE, CTRL, SHIFT, KeyModifiers::ALT] {
-                match action_for(&key(code, mods)) {
-                    Some(a) if !out.contains(&a) => out.push(a),
-                    _ => {}
+                add(action_for(&key(code, mods)));
+                for prefix in prefixes.iter().flatten() {
+                    let mut map = KeyMap::default();
+                    map.action_for(prefix, InputMode::Normal);
+                    add(map.action_for(&key(code, mods), InputMode::Normal));
                 }
             }
         }
@@ -428,8 +567,7 @@ mod tests {
         let bound = bound_actions();
         for c in COMMANDS {
             for a in c.actions {
-                let reachable = bound.contains(a) || matches!(a, Action::DockSidebar(_));
-                assert!(reachable, "{} ({a:?}) has no key", c.label);
+                assert!(bound.contains(a), "{} ({a:?}) has no key", c.label);
             }
         }
     }
@@ -447,61 +585,170 @@ mod tests {
 
     /// Feed `events` through one [`KeyMap`] and collect the actions.
     fn run_keymap(events: &[Event]) -> Vec<Option<Action>> {
+        run_keymap_in(InputMode::Normal, events)
+    }
+
+    fn run_keymap_in(mode: InputMode, events: &[Event]) -> Vec<Option<Action>> {
         let mut map = KeyMap::default();
-        events.iter().map(|e| map.action_for(e)).collect()
+        events.iter().map(|e| map.action_for(e, mode)).collect()
+    }
+
+    fn ch(c: char) -> Event {
+        key(KeyCode::Char(c), NONE)
     }
 
     #[test]
-    fn tab_then_arrow_docks_sidebar() {
-        let tab = key(KeyCode::Tab, NONE);
-        let left = key(KeyCode::Left, NONE);
-        let right = key(KeyCode::Right, NONE);
+    fn bracket_c_jumps_between_changes() {
         assert_eq!(
-            run_keymap(&[tab.clone(), left.clone(), left.clone()]),
+            run_keymap(&[ch(']'), ch('c'), ch('['), ch('c')]),
             [
-                Some(Action::ToggleSidebar),
-                Some(Action::DockSidebar(Dock::Left)),
-                Some(Action::ScrollLeft),
-            ],
-            "only the key right after Tab docks"
-        );
-        assert_eq!(
-            run_keymap(&[tab.clone(), right.clone()]),
-            [
-                Some(Action::ToggleSidebar),
-                Some(Action::DockSidebar(Dock::Right)),
+                None,
+                Some(Action::NextChange),
+                None,
+                Some(Action::PrevChange)
             ]
         );
     }
 
     #[test]
-    fn arrows_scroll_unless_right_after_tab() {
-        let tab = key(KeyCode::Tab, NONE);
-        let right = key(KeyCode::Right, NONE);
+    fn bracket_then_other_key_is_cancelled() {
         assert_eq!(
-            run_keymap(std::slice::from_ref(&right)),
-            [Some(Action::ScrollRight)]
+            run_keymap(&[ch(']'), ch('j'), ch('j')]),
+            [None, None, Some(Action::Down(1))],
+            "vim drops an unknown ]x, then keys work again"
         );
+    }
+
+    #[rstest]
+    #[case::w(ch('w'), Some(Action::SwitchPane))]
+    #[case::ctrl_w(key(KeyCode::Char('w'), CTRL), Some(Action::SwitchPane))]
+    #[case::shift_w(key(KeyCode::Char('W'), SHIFT), Some(Action::SwitchPane))]
+    #[case::p(ch('p'), Some(Action::SwitchPane))]
+    #[case::h(ch('h'), Some(Action::FocusPane(Pane::Left)))]
+    #[case::ctrl_h(key(KeyCode::Char('h'), CTRL), Some(Action::FocusPane(Pane::Left)))]
+    #[case::ctrl_h_as_backspace(key(KeyCode::Backspace, NONE), Some(Action::FocusPane(Pane::Left)))]
+    #[case::left(key(KeyCode::Left, NONE), Some(Action::FocusPane(Pane::Left)))]
+    #[case::l(ch('l'), Some(Action::FocusPane(Pane::Right)))]
+    #[case::ctrl_l(key(KeyCode::Char('l'), CTRL), Some(Action::FocusPane(Pane::Right)))]
+    #[case::right(key(KeyCode::Right, NONE), Some(Action::FocusPane(Pane::Right)))]
+    #[case::other_key_cancels(ch('x'), None)]
+    #[case::esc_cancels(key(KeyCode::Esc, NONE), None)]
+    fn ctrl_w_then_window_key(#[case] second: Event, #[case] expected: Option<Action>) {
         assert_eq!(
-            run_keymap(&[tab.clone(), key(KeyCode::Char('j'), NONE), right.clone()]),
-            [
-                Some(Action::ToggleSidebar),
-                Some(Action::Down(1)),
-                Some(Action::ScrollRight),
-            ]
-        );
-        assert_eq!(
-            run_keymap(&[tab, key(KeyCode::Char('l'), NONE)]),
-            [Some(Action::ToggleSidebar), Some(Action::ScrollRight)],
-            "only arrow keys dock, not h/l"
+            run_keymap(&[key(KeyCode::Char('w'), CTRL), second]),
+            [None, expected]
         );
     }
 
     #[test]
-    fn tab_release_and_mouse_moves_do_not_break_the_sequence() {
-        let release = Event::Key(KeyEvent {
-            code: KeyCode::Tab,
+    fn ctrl_w_sequence_ends_after_one_key() {
+        assert_eq!(
+            run_keymap(&[key(KeyCode::Char('w'), CTRL), ch('l'), ch('l')]),
+            [
+                None,
+                Some(Action::FocusPane(Pane::Right)),
+                Some(Action::ScrollRight)
+            ]
+        );
+    }
+
+    #[rstest]
+    #[case::letter(ch('n'), Some(Action::Prompt(PromptKey::Char('n'))))]
+    #[case::question_mark(
+        key(KeyCode::Char('?'), SHIFT),
+        Some(Action::Prompt(PromptKey::Char('?')))
+    )]
+    #[case::backslash(ch('\\'), Some(Action::Prompt(PromptKey::Char('\\'))))]
+    #[case::space(ch(' '), Some(Action::Prompt(PromptKey::Char(' '))))]
+    #[case::enter(key(KeyCode::Enter, NONE), Some(Action::Prompt(PromptKey::Submit)))]
+    #[case::esc(key(KeyCode::Esc, NONE), Some(Action::Prompt(PromptKey::Cancel)))]
+    #[case::ctrl_bracket(key(KeyCode::Char('['), CTRL), Some(Action::Prompt(PromptKey::Cancel)))]
+    #[case::backspace(
+        key(KeyCode::Backspace, NONE),
+        Some(Action::Prompt(PromptKey::Backspace))
+    )]
+    #[case::ctrl_h(
+        key(KeyCode::Char('h'), CTRL),
+        Some(Action::Prompt(PromptKey::Backspace))
+    )]
+    #[case::ctrl_w(
+        key(KeyCode::Char('w'), CTRL),
+        Some(Action::Prompt(PromptKey::DeleteWord))
+    )]
+    #[case::ctrl_u(key(KeyCode::Char('u'), CTRL), Some(Action::Prompt(PromptKey::Clear)))]
+    #[case::up(key(KeyCode::Up, NONE), Some(Action::Prompt(PromptKey::HistoryPrev)))]
+    #[case::down(key(KeyCode::Down, NONE), Some(Action::Prompt(PromptKey::HistoryNext)))]
+    #[case::ctrl_p(
+        key(KeyCode::Char('p'), CTRL),
+        Some(Action::Prompt(PromptKey::HistoryPrev))
+    )]
+    #[case::ctrl_n(
+        key(KeyCode::Char('n'), CTRL),
+        Some(Action::Prompt(PromptKey::HistoryNext))
+    )]
+    #[case::ctrl_c_still_quits(key(KeyCode::Char('c'), CTRL), Some(Action::ForceQuit))]
+    #[case::other_ctrl_ignored(key(KeyCode::Char('x'), CTRL), None)]
+    #[case::alt_ignored(key(KeyCode::Char('x'), KeyModifiers::ALT), None)]
+    #[case::tab_ignored(key(KeyCode::Tab, NONE), None)]
+    fn prompt_keys(#[case] event: Event, #[case] expected: Option<Action>) {
+        assert_eq!(run_keymap_in(InputMode::Prompt, &[event]), [expected]);
+    }
+
+    #[test]
+    fn prompt_mode_drops_a_pending_sequence() {
+        let mut map = KeyMap::default();
+        map.action_for(&ch(']'), InputMode::Normal);
+        map.action_for(&ch('x'), InputMode::Prompt);
+        assert_eq!(
+            map.action_for(&ch('c'), InputMode::Normal),
+            None,
+            "c alone is unbound"
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_while_typing() {
+        let wheel = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
             modifiers: NONE,
+        });
+        assert_eq!(
+            run_keymap_in(InputMode::Prompt, &[wheel]),
+            [Some(Action::Down(WHEEL_LINES))]
+        );
+    }
+
+    #[test]
+    fn tab_swaps_panes_every_press() {
+        let tab = key(KeyCode::Tab, NONE);
+        assert_eq!(
+            run_keymap(&[tab.clone(), tab.clone(), tab]),
+            [Some(Action::SwitchPane); 3],
+            "one key, no sequence"
+        );
+    }
+
+    #[test]
+    fn arrows_always_scroll() {
+        let tab = key(KeyCode::Tab, NONE);
+        assert_eq!(
+            run_keymap(&[tab, key(KeyCode::Left, NONE), key(KeyCode::Right, NONE)]),
+            [
+                Some(Action::SwitchPane),
+                Some(Action::ScrollLeft),
+                Some(Action::ScrollRight),
+            ],
+            "Tab no longer starts a docking sequence"
+        );
+    }
+
+    #[test]
+    fn key_release_and_mouse_moves_do_not_break_a_sequence() {
+        let release = Event::Key(KeyEvent {
+            code: KeyCode::Char('w'),
+            modifiers: CTRL,
             kind: KeyEventKind::Release,
             state: KeyEventState::NONE,
         });
@@ -513,17 +760,12 @@ mod tests {
         });
         assert_eq!(
             run_keymap(&[
-                key(KeyCode::Tab, NONE),
+                key(KeyCode::Char('w'), CTRL),
                 release,
                 moved,
-                key(KeyCode::Left, NONE)
+                key(KeyCode::Char('l'), NONE)
             ]),
-            [
-                Some(Action::ToggleSidebar),
-                None,
-                None,
-                Some(Action::DockSidebar(Dock::Left)),
-            ]
+            [None, None, None, Some(Action::FocusPane(Pane::Right))]
         );
     }
 

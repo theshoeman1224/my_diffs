@@ -11,6 +11,7 @@ fn cli() {
         .default_bin_name("mydiff")
         // Never pick up the developer's real config.
         .env("XDG_CONFIG_HOME", "/nonexistent/mydiff-tests")
+        .env("XDG_STATE_HOME", "/nonexistent/mydiff-tests")
         .env("NO_COLOR", "1")
         .env("COLUMNS", "80")
         .case("tests/cmd/*.trycmd");

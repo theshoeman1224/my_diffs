@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 mydiff-core.workspace = true
 ratatui.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

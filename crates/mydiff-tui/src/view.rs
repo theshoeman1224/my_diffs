@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use mydiff_core::display::{sanitize, segments, width};
+use mydiff_core::display::{sanitize, width};
 use mydiff_core::{LineRef, Row, RowKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
@@ -11,7 +11,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::app::{Action, App, Dock, Layout, LineSide, Sidebar};
+use crate::app::{Action, App, DisplayLine, Dock, Layout, LineSide, Pane, Sidebar};
+use crate::cmdline::{Message, Prompt};
 use crate::keys::{Group, SHORT_KEYS_W, ScreenKind, commands};
 
 /// Width of a line-number column including its trailing space.
@@ -38,6 +39,30 @@ pub fn hot_style() -> Style {
     Style::new()
         .fg(Color::Yellow)
         .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+}
+
+/// A search match. Underlined so it shows without color too.
+pub fn match_style() -> Style {
+    Style::new()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::UNDERLINED)
+}
+
+/// The match the view jumped to (`n` continues from it).
+pub fn current_match_style() -> Style {
+    Style::new()
+        .fg(Color::Black)
+        .bg(Color::Magenta)
+        .add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
+}
+
+/// An error message in the status bar (vim's `E…` messages).
+pub fn error_style() -> Style {
+    Style::new()
+        .fg(Color::White)
+        .bg(Color::Red)
+        .remove_modifier(Modifier::REVERSED)
 }
 
 pub fn dim() -> Style {
@@ -155,23 +180,48 @@ pub fn render_sidebar(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Columns of text a pane shows (after line numbers and markers).
+pub fn text_width(app: &App) -> usize {
+    let (main, _) = split_sidebar(Rect::new(0, 0, app.width, 1), app.sidebar, MIN_TEXT_COLS);
+    let w = usize::from(main.width);
+    match app.layout {
+        Layout::SideBySide => (w.saturating_sub(GUTTER_W) / 2).saturating_sub(NUM_W),
+        Layout::Inline => w.saturating_sub(2 * NUM_W + 2),
+    }
+}
+
+/// Marks the active pane's label in the header.
+pub const ACTIVE_MARK: &str = "▶";
+
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let s = &app.session;
     let w = usize::from(area.width);
+    let mark = |pane: Pane| if app.focus == pane { ACTIVE_MARK } else { " " };
     let text = match app.layout {
         Layout::SideBySide => {
             let pane = w.saturating_sub(GUTTER_W) / 2;
             format!(
-                " {}{} {}",
+                "{}{}{}{}{}",
+                mark(Pane::Left),
                 pad(
                     &tail(&s.left_label, pane.saturating_sub(1)),
                     pane.saturating_sub(1)
                 ),
                 " ".repeat(GUTTER_W),
+                mark(Pane::Right),
                 tail(&s.right_label, pane.saturating_sub(1))
             )
         }
-        Layout::Inline => pair_title("", &s.left_label, &s.right_label, w),
+        Layout::Inline => {
+            let each = w.saturating_sub(4) / 2;
+            format!(
+                "{}{} →{}{}",
+                mark(Pane::Left),
+                tail(&s.left_label, each),
+                mark(Pane::Right),
+                tail(&s.right_label, each)
+            )
+        }
     };
     frame.render_widget(Paragraph::new(pad(&text, w)).style(bar()), area);
 }
@@ -207,25 +257,80 @@ fn render_body(app: &App, frame: &mut Frame, area: Rect) {
         .iter()
         .skip(app.top)
         .take(usize::from(area.height))
-        .map(|dl| {
+        .map(|&dl| {
             let row = &app.diff.rows[dl.row];
+            let marks = marks_for(app, dl);
             match app.layout {
-                Layout::SideBySide => side_by_side_line(row, w, app.hscroll),
-                Layout::Inline => inline_line(row, dl.side, w, app.hscroll),
+                Layout::SideBySide => {
+                    let none = Marks::default();
+                    let (left, right) = match app.focus {
+                        Pane::Left => (&marks, &none),
+                        Pane::Right => (&none, &marks),
+                    };
+                    side_by_side_line(row, w, app.hscroll, left, right)
+                }
+                Layout::Inline => inline_line(row, dl.side, app.focus, w, app.hscroll, &marks),
             }
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn side_by_side_line(row: &Row, w: usize, hscroll: usize) -> Line<'static> {
+/// Search highlights on one line of text, as byte ranges.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Marks {
+    pub matches: Vec<Range<usize>>,
+    pub current: Option<Range<usize>>,
+}
+
+/// Search highlights for display line `dl`, on the active pane's text only.
+fn marks_for(app: &App, dl: DisplayLine) -> Marks {
+    let Some(re) = app.highlight_regex() else {
+        return Marks::default();
+    };
+    let Some(line) = app
+        .shows_focus(dl)
+        .then(|| app.focus.line(&app.diff.rows[dl.row]))
+        .flatten()
+    else {
+        return Marks::default();
+    };
+    Marks {
+        matches: re.find_iter(&line.text).map(|m| m.range()).collect(),
+        current: app
+            .search
+            .current
+            .filter(|m| m.row == dl.row)
+            .map(|m| m.start..m.end),
+    }
+}
+
+fn side_by_side_line(
+    row: &Row,
+    w: usize,
+    hscroll: usize,
+    left_marks: &Marks,
+    right_marks: &Marks,
+) -> Line<'static> {
     let pane = w.saturating_sub(GUTTER_W) / 2;
     let text_w = pane.saturating_sub(NUM_W);
     let style = row_style(row.kind);
     let mut spans = Vec::new();
-    spans.extend(numbered(row.left.as_ref(), style, text_w, hscroll));
+    spans.extend(numbered(
+        row.left.as_ref(),
+        style,
+        text_w,
+        hscroll,
+        left_marks,
+    ));
     spans.push(Span::styled(format!(" {} ", row.kind.marker()), style));
-    spans.extend(numbered(row.right.as_ref(), style, text_w, hscroll));
+    spans.extend(numbered(
+        row.right.as_ref(),
+        style,
+        text_w,
+        hscroll,
+        right_marks,
+    ));
     Line::from(spans)
 }
 
@@ -234,26 +339,38 @@ fn numbered(
     style: Style,
     text_w: usize,
     hscroll: usize,
+    marks: &Marks,
 ) -> Vec<Span<'static>> {
     match line {
         Some(l) => {
             let mut v = vec![Span::styled(format!("{:>4} ", l.number), dim())];
-            v.extend(text_spans(&l.text, &l.changed, style, hscroll, text_w));
+            v.extend(text_spans(
+                &l.text, &l.changed, marks, style, hscroll, text_w,
+            ));
             v
         }
         None => vec![Span::raw(" ".repeat(NUM_W + text_w))],
     }
 }
 
-fn inline_line(row: &Row, side: LineSide, w: usize, hscroll: usize) -> Line<'static> {
+fn inline_line(
+    row: &Row,
+    side: LineSide,
+    focus: Pane,
+    w: usize,
+    hscroll: usize,
+    marks: &Marks,
+) -> Line<'static> {
     let style = row_style(row.kind);
     let num =
         |l: Option<&LineRef>| l.map_or_else(|| "     ".to_owned(), |l| format!("{:>4} ", l.number));
     let (left_no, right_no, line) = match side {
+        // Rows that compare equal can still differ (ignored whitespace or case);
+        // show the active pane's version, which is the text searches look at.
         LineSide::Both => (
             row.left.as_ref(),
             row.right.as_ref(),
-            row.left.as_ref().or(row.right.as_ref()),
+            focus.line(row).or(focus.other().line(row)),
         ),
         LineSide::Left => (row.left.as_ref(), None, row.left.as_ref()),
         LineSide::Right => (None, row.right.as_ref(), row.right.as_ref()),
@@ -270,24 +387,50 @@ fn inline_line(row: &Row, side: LineSide, w: usize, hscroll: usize) -> Line<'sta
         Span::styled(format!("{marker} "), style),
     ];
     if let Some(l) = line {
-        spans.extend(text_spans(&l.text, &l.changed, style, hscroll, text_w));
+        spans.extend(text_spans(
+            &l.text, &l.changed, marks, style, hscroll, text_w,
+        ));
     }
     Line::from(spans)
 }
 
 /// Styled spans for one line's text: tabs expanded, `skip` columns hidden on the
-/// left, clipped and padded to exactly `width` columns.
+/// left, clipped and padded to exactly `width` columns. Search marks win over
+/// changed-word highlights, and the current match over other matches.
 pub fn text_spans(
     text: &str,
     changed: &[Range<usize>],
+    marks: &Marks,
     base: Style,
     skip: usize,
     width_cols: usize,
 ) -> Vec<Span<'static>> {
+    let mut cuts = vec![0, text.len()];
+    for r in changed
+        .iter()
+        .chain(&marks.matches)
+        .chain(marks.current.as_ref())
+    {
+        cuts.extend([r.start.min(text.len()), r.end.min(text.len())]);
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let within = |ranges: &[Range<usize>], at: usize| ranges.iter().any(|r| r.contains(&at));
     let mut out = Vec::new();
     let mut col = 0; // display column in the expanded line
     let mut used = 0; // columns emitted
-    for (seg, is_hot) in segments(text, changed) {
+    for pair in cuts.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        let seg = &text[start..end];
+        let style = if marks.current.as_ref().is_some_and(|r| r.contains(&start)) {
+            current_match_style()
+        } else if within(&marks.matches, start) {
+            match_style()
+        } else if within(changed, start) {
+            hot_style()
+        } else {
+            base
+        };
         let clean = sanitize(seg, col);
         let mut piece = String::new();
         for c in clean.chars() {
@@ -304,7 +447,7 @@ pub fn text_spans(
             used += cw;
         }
         if !piece.is_empty() {
-            out.push(Span::styled(piece, if is_hot { hot_style() } else { base }));
+            out.push(Span::styled(piece, style));
         }
     }
     if used < width_cols {
@@ -314,6 +457,14 @@ pub fn text_spans(
 }
 
 fn render_status(app: &App, frame: &mut Frame, area: Rect) {
+    if let Some(prompt) = &app.cmdline.prompt {
+        render_prompt(frame, area, prompt);
+        return;
+    }
+    if let Some(message) = &app.message {
+        render_message(frame, area, message);
+        return;
+    }
     let o = &app.session.options;
     let on = |b: bool| if b { "on" } else { "off" };
     let left = format!(
@@ -334,7 +485,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         (None, n) => format!("{n} change{}", if n == 1 { "" } else { "s" }),
     };
     let right = format!(
-        "-{} +{} ~{}  {position}  tab:keys ?:help q:quit ",
+        "-{} +{} ~{}  {position}  F1:keys :help q:quit ",
         s.removed, s.added, s.modified
     );
     render_status_line(frame, area, &left, &right);
@@ -354,8 +505,43 @@ pub fn render_status_line(frame: &mut Frame, area: Rect, left: &str, right: &str
     frame.render_widget(Paragraph::new(pad(&line, w)).style(bar()), area);
 }
 
+/// A message across the whole status bar; errors in white on red.
+pub fn render_message(frame: &mut Frame, area: Rect, message: &Message) {
+    let style = if message.error { error_style() } else { bar() };
+    let text = format!(" {}", sanitize(&message.text, 1));
+    let w = usize::from(area.width);
+    let text = if width(&text) > w {
+        format!("{}…", pad(&text, w.saturating_sub(1)))
+    } else {
+        pad(&text, w)
+    };
+    frame.render_widget(Paragraph::new(pad(&text, w)).style(style), area);
+}
+
+/// The open `/`, `?` or `:` line, like vim's command line: plain colors, the
+/// terminal cursor after the text, and the start cut off when it is too long.
+pub fn render_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt) {
+    let w = usize::from(area.width);
+    let text = format!("{}{}", prompt.kind.leader(), sanitize(&prompt.input, 1));
+    let shown = tail(&text, w.saturating_sub(1));
+    let cursor = u16::try_from(width(&shown)).unwrap_or(u16::MAX);
+    frame.render_widget(Paragraph::new(pad(&shown, w)), area);
+    if area.width > 0 {
+        frame.set_cursor_position((area.x + cursor.min(area.width - 1), area.y));
+    }
+}
+
 /// Full key reference for `screen`, centered over everything.
 pub fn render_help(frame: &mut Frame, screen: ScreenKind) {
+    let search_legend = (screen == ScreenKind::Text).then(|| {
+        Line::from(vec![
+            Span::raw("search: "),
+            Span::styled("match", match_style()),
+            Span::raw(" "),
+            Span::styled("current match", current_match_style()),
+            Span::raw(format!("  active pane marked {ACTIVE_MARK}")),
+        ])
+    });
     let listed: Vec<_> = Group::ALL
         .into_iter()
         .flat_map(|g| commands(screen, g))
@@ -386,6 +572,17 @@ pub fn render_help(frame: &mut Frame, screen: ScreenKind) {
                 Span::styled(" ignored ", row_style(RowKind::Ignored)),
             ]),
         ])
+        .chain(search_legend)
+        .chain([Line::from(vec![
+            Span::styled(":help", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw(" this list  "),
+            Span::styled(
+                ":sidebar [left|right]",
+                Style::new().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(":noh :q :qa", Style::new().add_modifier(Modifier::BOLD)),
+        ])])
         .collect();
     let area = frame.area();
     let h = (lines.len() as u16 + 2).min(area.height);
@@ -473,7 +670,7 @@ mod tests {
     #[test]
     fn help_overlay_screen() {
         let mut a = app(LEFT, RIGHT, 80, 24);
-        a.update(Action::ToggleHelp);
+        help(&mut a);
         insta::assert_snapshot!(screen(&a));
     }
 
@@ -501,7 +698,8 @@ mod tests {
         assert!(!s.contains("commands"), "{s}");
         let header = s.lines().next().unwrap().trim_matches('"');
         // Right label starts past the middle of the full 100 columns.
-        assert_eq!(header.find("right.txt"), Some(52), "{header}");
+        let col = header.find("right.txt").map(|i| width(&header[..i]));
+        assert_eq!(col, Some(52), "{header}");
     }
 
     #[test]
@@ -553,9 +751,10 @@ mod tests {
     #[test]
     fn help_lists_only_this_screens_commands() {
         let mut a = app(LEFT, RIGHT, 80, 30);
-        a.update(Action::ToggleHelp);
+        help(&mut a);
         let s = screen(&a);
-        assert!(s.contains("Tab then ← / →"), "{s}");
+        assert!(s.contains("Tab Ctrl-w w"), "{s}");
+        assert!(s.contains(":sidebar [left|right]"), "{s}");
         assert!(!s.contains("open file diff"), "folder-only command: {s}");
     }
 
@@ -564,7 +763,7 @@ mod tests {
         let s = screen(&app(LEFT, RIGHT, 50, 6));
         let status = s.lines().last().unwrap();
         assert!(
-            status.contains("-1 +1 ~1  2 changes  tab:keys ?:help q:quit"),
+            status.contains("-1 +1 ~1  2 changes  F1:keys :help q:quit"),
             "{status}"
         );
     }
@@ -586,7 +785,7 @@ mod tests {
         for (w, h) in [(1, 1), (5, 3), (12, 4), (94, 1), (94, 2), (94, 3)] {
             let mut a = app(LEFT, RIGHT, w, h);
             screen(&a);
-            a.update(Action::ToggleHelp);
+            help(&mut a);
             screen(&a);
         }
     }
@@ -636,6 +835,260 @@ mod tests {
         assert!(header.contains("canonical)"), "{header}");
     }
 
+    fn type_line(a: &mut App, open: Action, text: &str, submit: bool) {
+        a.update(open);
+        for c in text.chars() {
+            a.update(Action::Prompt(crate::cmdline::PromptKey::Char(c)));
+        }
+        if submit {
+            a.update(Action::Prompt(crate::cmdline::PromptKey::Submit));
+        }
+    }
+
+    fn help(a: &mut App) {
+        type_line(a, Action::StartCommand, "help", true);
+    }
+
+    fn search(a: &mut App, pattern: &str) {
+        type_line(
+            a,
+            Action::StartSearch(crate::search::Direction::Forward),
+            pattern,
+            true,
+        );
+    }
+
+    /// Columns of row `y` whose symbol starts `needle`.
+    fn cols_of(t: &Terminal<TestBackend>, y: u16, needle: &str) -> Vec<u16> {
+        let line = t
+            .backend()
+            .to_string()
+            .lines()
+            .nth(y.into())
+            .unwrap()
+            .trim_matches('"')
+            .to_owned();
+        let mut out = Vec::new();
+        let mut from = 0;
+        while let Some(i) = line[from..].find(needle) {
+            out.push(u16::try_from(width(&line[..from + i])).unwrap());
+            from += i + needle.len();
+        }
+        out
+    }
+
+    #[test]
+    fn search_highlights_only_the_active_pane() {
+        let mut a = app("one apple\nkeep\n", "two apple\nkeep\n", 60, 6);
+        search(&mut a, "apple");
+        let t = draw(&a);
+        let buf = t.backend().buffer();
+        let [left, right] = cols_of(&t, 1, "apple")[..] else {
+            panic!("apple on both sides")
+        };
+        assert_eq!(buf[(left, 1)].bg, Color::Magenta, "current match");
+        assert!(buf[(left, 1)].modifier.contains(Modifier::UNDERLINED));
+        assert_ne!(buf[(right, 1)].bg, Color::Magenta);
+        assert_ne!(
+            buf[(right, 1)].bg,
+            Color::Cyan,
+            "right pane is not searched"
+        );
+
+        a.update(Action::SwitchPane);
+        let t = draw(&a);
+        let buf = t.backend().buffer();
+        assert_eq!(
+            buf[(right, 1)].bg,
+            Color::Cyan,
+            "other match, not the current one"
+        );
+        assert_ne!(buf[(left, 1)].bg, Color::Cyan);
+    }
+
+    #[test]
+    fn every_match_is_highlighted_and_noh_clears_them() {
+        let mut a = app("ab ab ab\n", "x\n", 60, 5);
+        search(&mut a, "ab");
+        let t = draw(&a);
+        let buf = t.backend().buffer();
+        let cols = cols_of(&t, 1, "ab");
+        assert_eq!(cols.len(), 3);
+        assert_eq!(buf[(cols[0], 1)].bg, Color::Magenta);
+        assert_eq!(buf[(cols[1], 1)].bg, Color::Cyan);
+        assert_eq!(buf[(cols[2] + 1, 1)].bg, Color::Cyan);
+        assert_eq!(
+            buf[(cols[0] + 2, 1)].bg,
+            Color::Reset,
+            "space between matches"
+        );
+        type_line(&mut a, Action::StartCommand, "noh", true);
+        let t = draw(&a);
+        let buf = t.backend().buffer();
+        assert!(cols.iter().all(|&x| buf[(x, 1)].bg == Color::Reset));
+    }
+
+    #[test]
+    fn search_marks_win_over_changed_words() {
+        let mut a = app("the quick fox\n", "the slow fox\n", 60, 5);
+        search(&mut a, "uic");
+        let t = draw(&a);
+        let buf = t.backend().buffer();
+        let q = cols_of(&t, 1, "quick")[0];
+        assert!(
+            buf[(q, 1)].modifier.contains(Modifier::REVERSED),
+            "q still a changed word"
+        );
+        assert_eq!(buf[(q + 1, 1)].bg, Color::Magenta, "u is the match");
+    }
+
+    #[test]
+    fn header_marks_the_active_pane() {
+        let mut a = app(LEFT, RIGHT, 60, 6);
+        let header = |a: &App| {
+            screen(a)
+                .lines()
+                .next()
+                .unwrap()
+                .trim_matches('"')
+                .to_owned()
+        };
+        assert!(header(&a).starts_with("▶left.txt"), "{}", header(&a));
+        assert!(header(&a).contains(" right.txt"));
+        a.update(Action::FocusPane(Pane::Right));
+        assert!(header(&a).contains("▶right.txt"), "{}", header(&a));
+        assert!(header(&a).starts_with(" left.txt"));
+        a.update(Action::ToggleLayout);
+        assert!(
+            header(&a).starts_with(" left.txt →▶right.txt"),
+            "{}",
+            header(&a)
+        );
+    }
+
+    #[test]
+    fn inline_equal_rows_show_the_active_panes_text() {
+        let mut a = app("a  b\n", "a b\n", 60, 5);
+        a.update(Action::CycleWhitespace);
+        a.update(Action::CycleWhitespace); // change: rows compare equal
+        a.update(Action::ToggleLayout);
+        assert!(a.diff.is_identical());
+        let body = |a: &App| screen(a).lines().nth(1).unwrap().to_owned();
+        assert!(body(&a).contains("a  b"), "{}", body(&a));
+        a.update(Action::SwitchPane);
+        assert!(body(&a).contains("a b "), "{}", body(&a));
+    }
+
+    #[test]
+    fn prompt_replaces_the_status_bar_with_a_cursor() {
+        let mut a = app(LEFT, RIGHT, 60, 8);
+        type_line(
+            &mut a,
+            Action::StartSearch(crate::search::Direction::Backward),
+            r"del\c",
+            false,
+        );
+        let mut t = draw(&a);
+        let status = t.backend().to_string().lines().last().unwrap().to_owned();
+        assert_eq!(status.trim_matches('"').trim_end(), r"?del\c");
+        assert_eq!(
+            t.get_cursor_position().unwrap(),
+            ratatui::layout::Position { x: 6, y: 7 }
+        );
+        assert!(
+            !t.backend().buffer()[(0, 7)]
+                .modifier
+                .contains(Modifier::REVERSED),
+            "plain, like vim's command line"
+        );
+        insta::assert_snapshot!(screen(&a));
+    }
+
+    #[test]
+    fn long_prompt_keeps_its_end() {
+        let mut a = app(LEFT, RIGHT, 20, 6);
+        type_line(&mut a, Action::StartCommand, &"x".repeat(40), false);
+        let status = screen(&a)
+            .lines()
+            .last()
+            .unwrap()
+            .trim_matches('"')
+            .to_owned();
+        assert!(
+            status.starts_with('…') && status.trim_end().ends_with('x'),
+            "{status}"
+        );
+    }
+
+    #[test]
+    fn search_result_and_errors_show_in_the_status_bar() {
+        let mut a = app(LEFT, RIGHT, 80, 8);
+        search(&mut a, "delta");
+        let s = screen(&a);
+        assert!(s.lines().last().unwrap().contains("/delta  [1/1]"), "{s}");
+        search(&mut a, "nope");
+        let t = draw(&a);
+        let s = t.backend().to_string();
+        assert!(
+            s.lines()
+                .last()
+                .unwrap()
+                .contains("E486: Pattern not found: nope "),
+            "{s}"
+        );
+        assert_eq!(
+            t.backend().buffer()[(2, 7)].bg,
+            Color::Red,
+            "errors are red"
+        );
+    }
+
+    #[test]
+    fn other_pane_hint_fits_next_to_the_sidebar() {
+        let mut a = app(LEFT, "zeta-gamma\n", 100, 12);
+        search(&mut a, "zeta-gamma");
+        let s = screen(&a);
+        assert!(
+            s.lines()
+                .last()
+                .unwrap()
+                .contains("E486: Pattern not found: zeta-gamma (in right pane: Tab)"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn far_right_match_is_visible_after_the_jump() {
+        let long = format!("{}needle\n", "x".repeat(200));
+        let mut a = app(&long, &long, 80, 6);
+        search(&mut a, "needle");
+        let t = draw(&a);
+        let [left, right] = cols_of(&t, 1, "needle")[..] else {
+            panic!("panes scroll together: {}", t.backend())
+        };
+        assert_eq!(t.backend().buffer()[(left, 1)].bg, Color::Magenta);
+        assert_eq!(t.backend().buffer()[(right, 1)].bg, Color::Reset);
+    }
+
+    #[test]
+    fn help_shows_the_search_legend_on_text_screens_only() {
+        let mut a = app(LEFT, RIGHT, 100, 40);
+        help(&mut a);
+        let s = screen(&a);
+        assert!(s.contains("current match"), "{s}");
+        assert!(s.contains(r"\c ignores case"), "{s}");
+    }
+
+    fn text_spans_plain(
+        text: &str,
+        changed: &[Range<usize>],
+        base: Style,
+        skip: usize,
+        w: usize,
+    ) -> Vec<Span<'static>> {
+        text_spans(text, changed, &Marks::default(), base, skip, w)
+    }
+
     #[test]
     fn text_spans_clip_scroll_and_pad() {
         let plain = |spans: Vec<Span>| {
@@ -644,10 +1097,25 @@ mod tests {
                 .map(|s| s.content.to_string())
                 .collect::<String>()
         };
-        assert_eq!(plain(text_spans("abcdef", &[], Style::new(), 0, 4)), "abcd");
-        assert_eq!(plain(text_spans("abcdef", &[], Style::new(), 2, 3)), "cde");
-        assert_eq!(plain(text_spans("ab", &[], Style::new(), 0, 4)), "ab  ");
-        assert_eq!(plain(text_spans("\tx", &[], Style::new(), 0, 6)), "    x ");
-        assert_eq!(plain(text_spans("日本", &[], Style::new(), 0, 3)), "日 ");
+        assert_eq!(
+            plain(text_spans_plain("abcdef", &[], Style::new(), 0, 4)),
+            "abcd"
+        );
+        assert_eq!(
+            plain(text_spans_plain("abcdef", &[], Style::new(), 2, 3)),
+            "cde"
+        );
+        assert_eq!(
+            plain(text_spans_plain("ab", &[], Style::new(), 0, 4)),
+            "ab  "
+        );
+        assert_eq!(
+            plain(text_spans_plain("\tx", &[], Style::new(), 0, 6)),
+            "    x "
+        );
+        assert_eq!(
+            plain(text_spans_plain("日本", &[], Style::new(), 0, 3)),
+            "日 "
+        );
     }
 }
