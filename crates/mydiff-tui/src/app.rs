@@ -1,6 +1,6 @@
 //! Application state and the pure `update` function.
 
-use mydiff_core::{DiffOptions, Result, RowKind, TextDiff, diff_text};
+use mydiff_core::{DiffOptions, Result, RowKind, TextDiff, WhitespaceMode, diff_text};
 
 /// Inputs for an interactive text comparison.
 #[derive(Debug, Clone)]
@@ -36,6 +36,60 @@ pub struct DisplayLine {
     pub side: LineSide,
 }
 
+/// Which edge of the screen the command sidebar sits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dock {
+    Left,
+    Right,
+}
+
+/// The command sidebar: open on the right by default. Every screen owns one;
+/// a folder view hands its sidebar to an opened file and takes it back after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sidebar {
+    /// What the user asked for. A narrow terminal may still hide it.
+    pub open: bool,
+    pub dock: Dock,
+}
+
+impl Default for Sidebar {
+    fn default() -> Self {
+        Self {
+            open: true,
+            dock: Dock::Right,
+        }
+    }
+}
+
+impl Sidebar {
+    /// Apply a sidebar action; other actions are ignored.
+    pub fn update(&mut self, action: Action) {
+        match action {
+            Action::ToggleSidebar => self.open ^= true,
+            Action::DockSidebar(dock) => {
+                self.open = true;
+                self.dock = dock;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Live value of a comparison toggle for the sidebar: (text, is it on).
+pub fn option_value(options: &DiffOptions, action: Action) -> Option<(&'static str, bool)> {
+    let on_off = |b: bool| (if b { "on" } else { "off" }, b);
+    Some(match action {
+        Action::CycleWhitespace => (
+            options.whitespace.label(),
+            options.whitespace != WhitespaceMode::Exact,
+        ),
+        Action::ToggleCase => on_off(options.ignore_case),
+        Action::ToggleBlankLines => on_off(options.ignore_blank_lines),
+        Action::ToggleLineEndings => on_off(options.ignore_line_endings),
+        _ => return None,
+    })
+}
+
 /// Everything the user can do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -64,6 +118,10 @@ pub enum Action {
     ToggleLineEndings,
     ToggleLayout,
     ToggleHelp,
+    /// Show or hide the command sidebar (Tab).
+    ToggleSidebar,
+    /// Open the command sidebar on one edge (Tab, then ← or →).
+    DockSidebar(Dock),
     /// Terminal size changed (full terminal size, in cells).
     Resize {
         width: u16,
@@ -94,6 +152,7 @@ pub struct App {
     pub viewport: usize,
     pub width: u16,
     pub show_help: bool,
+    pub sidebar: Sidebar,
     pub should_quit: bool,
 }
 
@@ -112,6 +171,7 @@ impl App {
             viewport: 20,
             width: 80,
             show_help: false,
+            sidebar: Sidebar::default(),
             should_quit: false,
         };
         app.rebuild_lines();
@@ -130,6 +190,7 @@ impl App {
                 }
             }
             Action::ToggleHelp => self.show_help = !self.show_help,
+            Action::ToggleSidebar | Action::DockSidebar(_) => self.sidebar.update(action),
             Action::Up(n) => self.scroll_to(self.top.saturating_sub(n)),
             Action::Down(n) => self.scroll_to(self.top + n),
             Action::PageUp => self.scroll_to(self.top.saturating_sub(self.page())),
@@ -170,6 +231,17 @@ impl App {
                 self.viewport = usize::from(height.saturating_sub(CHROME_ROWS)).max(1);
                 self.top = self.top.min(self.max_top());
             }
+        }
+    }
+
+    /// Live value shown next to a command in the sidebar.
+    pub fn command_value(&self, action: Action) -> Option<(&'static str, bool)> {
+        match action {
+            Action::ToggleLayout => Some(match self.layout {
+                Layout::SideBySide => ("side-by-side", false),
+                Layout::Inline => ("inline", true),
+            }),
+            _ => option_value(&self.session.options, action),
         }
     }
 
@@ -272,8 +344,6 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use mydiff_core::WhitespaceMode;
-
     use super::*;
 
     fn session(left: &str, right: &str) -> TextSession {
@@ -401,6 +471,70 @@ mod tests {
         assert!(!app.show_help && !app.should_quit);
         app.update(Action::Back);
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn tab_toggles_sidebar_and_back_leaves_it_open() {
+        let mut app = long_app(10);
+        assert!(app.sidebar.open, "open by default");
+        app.update(Action::Back);
+        assert!(
+            app.sidebar.open && app.should_quit,
+            "Esc quits, sidebar untouched"
+        );
+        let mut app = long_app(10);
+        app.update(Action::ToggleSidebar);
+        assert!(!app.sidebar.open);
+        app.update(Action::ToggleSidebar);
+        assert!(app.sidebar.open);
+    }
+
+    #[test]
+    fn docking_opens_sidebar_on_that_side() {
+        let mut app = long_app(10);
+        app.update(Action::ToggleSidebar); // Tab closes it...
+        app.update(Action::DockSidebar(Dock::Left)); // ...then ← reopens it on the left
+        assert_eq!(
+            app.sidebar,
+            Sidebar {
+                open: true,
+                dock: Dock::Left
+            }
+        );
+        app.update(Action::DockSidebar(Dock::Right));
+        assert_eq!(app.sidebar.dock, Dock::Right);
+    }
+
+    #[test]
+    fn sidebar_toggles_keep_scroll_position() {
+        let mut app = long_app(10);
+        app.update(Action::Down(40));
+        app.update(Action::ToggleSidebar);
+        app.update(Action::DockSidebar(Dock::Left));
+        assert_eq!(app.top, 40);
+    }
+
+    #[test]
+    fn command_values_follow_toggles() {
+        let mut app = App::new(session("a\n", "b\n")).unwrap();
+        assert_eq!(
+            app.command_value(Action::CycleWhitespace),
+            Some(("exact", false))
+        );
+        assert_eq!(app.command_value(Action::ToggleCase), Some(("off", false)));
+        app.update(Action::CycleWhitespace);
+        app.update(Action::ToggleCase);
+        app.update(Action::ToggleLayout);
+        assert_eq!(
+            app.command_value(Action::CycleWhitespace),
+            Some(("trailing", true))
+        );
+        assert_eq!(app.command_value(Action::ToggleCase), Some(("on", true)));
+        assert_eq!(
+            app.command_value(Action::ToggleLayout),
+            Some(("inline", true))
+        );
+        assert_eq!(app.command_value(Action::NextChange), None);
     }
 
     #[test]

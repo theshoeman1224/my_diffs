@@ -32,7 +32,15 @@ mydiff dir_a/ dir_b/           # folder list; Enter opens a file, Esc returns
 | `i` / `b` / `e` | ignore case / blank lines / line endings |
 | `u` | side-by-side ↔ inline layout |
 | `s` | folder view: show/hide identical files |
+| `Tab` | show / hide the command sidebar |
+| `Tab` then `←` / `→` | dock the sidebar on the left / right (opens it) |
 | `?` | help · `q`/`Esc` quit or back · `Ctrl-c` quit |
+
+A sidebar listing every command for the current screen, with the current value
+of each toggle, is open on the right by default. It needs room next to the diff
+(94 columns for text, 84 for folders, 113 for hex), so it hides itself in a
+narrower terminal and comes back when the window is widened. A folder view and
+the files opened from it share the same sidebar setting.
 
 Viewing from Windows: run `mydiff` on the Linux host inside your SSH session
 (Windows Terminal, PuTTY or MobaXterm), or in an `xterm` shown through an X server.

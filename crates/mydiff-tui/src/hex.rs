@@ -8,7 +8,8 @@ use ratatui::layout::{Constraint, Layout as Split};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::app::{Action, CHROME_ROWS, JUMP_CONTEXT, LineSide};
+use crate::app::{Action, CHROME_ROWS, JUMP_CONTEXT, LineSide, Sidebar};
+use crate::keys::ScreenKind;
 use crate::view;
 
 /// Inputs for an interactive binary comparison.
@@ -30,8 +31,12 @@ pub struct HexApp {
     pub viewport: usize,
     pub width: u16,
     pub show_help: bool,
+    pub sidebar: Sidebar,
     pub should_quit: bool,
 }
+
+/// Columns of one hex row: marker, offset, 16 bytes, ASCII column.
+pub const ROW_COLS: u16 = 79;
 
 impl HexApp {
     pub fn new(session: HexSession) -> Self {
@@ -57,6 +62,7 @@ impl HexApp {
             viewport: 20,
             width: 80,
             show_help: false,
+            sidebar: Sidebar::default(),
             should_quit: false,
         }
     }
@@ -82,6 +88,7 @@ impl HexApp {
                 }
             }
             Action::ToggleHelp => self.show_help = !self.show_help,
+            Action::ToggleSidebar | Action::DockSidebar(_) => self.sidebar.update(action),
             Action::Up(n) => self.scroll_to(self.top.saturating_sub(n)),
             Action::Down(n) => self.scroll_to(self.top + n),
             Action::PageUp => self.scroll_to(self.top.saturating_sub(page)),
@@ -116,12 +123,13 @@ impl HexApp {
 }
 
 pub fn render(app: &HexApp, frame: &mut Frame) {
+    let (main, sidebar) = view::split_sidebar(frame.area(), app.sidebar, ROW_COLS);
     let [header, body, status] = Split::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
-    .areas(frame.area());
+    .areas(main);
     let w = usize::from(header.width);
     let s = &app.session;
     let title = view::pair_title("[binary] ", &s.left_label, &s.right_label, w);
@@ -179,12 +187,15 @@ pub fn render(app: &HexApp, frame: &mut Frame) {
         (None, n) => format!("{n} changed row{}", if n == 1 { "" } else { "s" }),
     };
     let right = format!(
-        "{} bytes differ  {position}  ?:help q:quit ",
+        "{} bytes differ  {position}  tab:keys ?:help q:quit ",
         st.differing_bytes
     );
     view::render_status_line(frame, status, &left, &right);
+    if let Some(area) = sidebar {
+        view::render_sidebar(frame, area, app.sidebar.dock, ScreenKind::Hex, &|_| None);
+    }
     if app.show_help {
-        view::render_help(frame);
+        view::render_help(frame, ScreenKind::Hex);
     }
 }
 
@@ -234,11 +245,43 @@ mod tests {
         assert_eq!((a.current_change, a.top), (Some(0), 0));
     }
 
+    fn screen_at(a: &HexApp, w: u16, h: u16) -> String {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| render(a, f)).unwrap();
+        t.backend().to_string()
+    }
+
     #[test]
     fn screen() {
+        insta::assert_snapshot!(screen_at(&app(), 80, 9));
+    }
+
+    #[test]
+    fn sidebar_needs_room_for_a_full_hex_row() {
         let a = app();
-        let mut t = Terminal::new(TestBackend::new(80, 9)).unwrap();
-        t.draw(|f| render(&a, f)).unwrap();
-        insta::assert_snapshot!(t.backend().to_string());
+        let w = ROW_COLS + view::SIDEBAR_W;
+        assert!(!screen_at(&a, w - 1, 9).contains("commands"));
+        assert!(screen_at(&a, w, 9).contains("commands"));
+    }
+
+    #[test]
+    fn screen_with_sidebar() {
+        let mut a = app();
+        a.update(Action::Resize {
+            width: 113,
+            height: 22,
+        });
+        insta::assert_snapshot!(screen_at(&a, 113, 22));
+    }
+
+    #[test]
+    fn sidebar_actions() {
+        let mut a = app();
+        a.update(Action::ToggleSidebar);
+        assert!(!a.sidebar.open);
+        a.update(Action::DockSidebar(crate::app::Dock::Left));
+        assert!(a.sidebar.open);
+        a.update(Action::Back);
+        assert!(a.should_quit);
     }
 }

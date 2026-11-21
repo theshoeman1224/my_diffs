@@ -11,13 +11,17 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::app::{App, Layout, LineSide};
-use crate::keys::HELP;
+use crate::app::{Action, App, Dock, Layout, LineSide, Sidebar};
+use crate::keys::{Group, SHORT_KEYS_W, ScreenKind, commands};
 
 /// Width of a line-number column including its trailing space.
 const NUM_W: usize = 5;
 /// Width of the side-by-side gutter (" ~ ").
 const GUTTER_W: usize = 3;
+/// Width of the command sidebar, including its border.
+pub const SIDEBAR_W: u16 = 34;
+/// Narrowest text diff that still leaves room for the sidebar.
+pub const MIN_TEXT_COLS: u16 = 60;
 
 pub fn row_style(kind: RowKind) -> Style {
     match kind {
@@ -45,18 +49,110 @@ pub fn bar() -> Style {
 }
 
 pub fn render(app: &App, frame: &mut Frame) {
+    let (main, sidebar) = split_sidebar(frame.area(), app.sidebar, MIN_TEXT_COLS);
     let [header, body, status] = Split::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
-    .areas(frame.area());
+    .areas(main);
     render_header(app, frame, header);
     render_body(app, frame, body);
     render_status(app, frame, status);
-    if app.show_help {
-        render_help(frame);
+    if let Some(area) = sidebar {
+        render_sidebar(frame, area, app.sidebar.dock, ScreenKind::Text, &|a| {
+            app.command_value(a)
+        });
     }
+    if app.show_help {
+        render_help(frame, ScreenKind::Text);
+    }
+}
+
+/// Split a full-height sidebar column off `area` when the sidebar is open and
+/// at least `min_main` columns remain for the screen itself.
+pub fn split_sidebar(area: Rect, sidebar: Sidebar, min_main: u16) -> (Rect, Option<Rect>) {
+    if !sidebar.open || area.width < min_main.saturating_add(SIDEBAR_W) {
+        return (area, None);
+    }
+    let main_w = area.width - SIDEBAR_W;
+    let (main_x, side_x) = match sidebar.dock {
+        Dock::Left => (area.x + SIDEBAR_W, area.x),
+        Dock::Right => (area.x, area.x + main_w),
+    };
+    let main = Rect {
+        x: main_x,
+        width: main_w,
+        ..area
+    };
+    let side = Rect {
+        x: side_x,
+        width: SIDEBAR_W,
+        ..area
+    };
+    (main, Some(side))
+}
+
+/// Live value of a command: (text, whether it is switched on).
+pub type ValueFn<'a> = dyn Fn(Action) -> Option<(&'static str, bool)> + 'a;
+
+/// The command sidebar: a title bar in line with the header, then every
+/// command of `screen` by group, with live values right-aligned.
+pub fn render_sidebar(
+    frame: &mut Frame,
+    area: Rect,
+    dock: Dock,
+    screen: ScreenKind,
+    value: &ValueFn,
+) {
+    let [title, rest] = Split::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let w = usize::from(title.width);
+    frame.render_widget(Paragraph::new(pad(" commands", w)).style(bar()), title);
+    let block = Block::default().borders(match dock {
+        Dock::Left => Borders::RIGHT,
+        Dock::Right => Borders::LEFT,
+    });
+    let inner = block.inner(rest);
+    frame.render_widget(block, rest);
+
+    let iw = usize::from(inner.width);
+    let bold = Style::new().add_modifier(Modifier::BOLD);
+    let mut lines: Vec<Line> = Vec::new();
+    for group in Group::ALL {
+        let mut items = commands(screen, group).peekable();
+        if items.peek().is_none() {
+            continue;
+        }
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::styled(
+            pad(&format!(" {}", group.title()), iw),
+            bold.add_modifier(Modifier::UNDERLINED),
+        ));
+        for c in items {
+            let key = format!(" {} ", pad(c.short, SHORT_KEYS_W));
+            let (val, on) = c
+                .actions
+                .first()
+                .and_then(|&a| value(a))
+                .unwrap_or(("", false));
+            // The value and one trailing space are right-aligned; the label fills the rest.
+            let val_w = if val.is_empty() { 0 } else { width(val) + 1 };
+            let label_w = iw.saturating_sub(width(&key) + val_w);
+            lines.push(Line::from(vec![
+                Span::styled(key, bold),
+                Span::raw(pad(c.label, label_w)),
+                Span::styled(val, if on { bold } else { Style::new() }),
+            ]));
+        }
+    }
+    let h = usize::from(inner.height);
+    if lines.len() > h && h > 0 {
+        lines.truncate(h - 1);
+        lines.push(Line::styled(" …", dim()));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
@@ -238,7 +334,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         (None, n) => format!("{n} change{}", if n == 1 { "" } else { "s" }),
     };
     let right = format!(
-        "-{} +{} ~{}  {position}  ?:help q:quit ",
+        "-{} +{} ~{}  {position}  tab:keys ?:help q:quit ",
         s.removed, s.added, s.modified
     );
     render_status_line(frame, area, &left, &right);
@@ -258,14 +354,26 @@ pub fn render_status_line(frame: &mut Frame, area: Rect, left: &str, right: &str
     frame.render_widget(Paragraph::new(pad(&line, w)).style(bar()), area);
 }
 
-pub fn render_help(frame: &mut Frame) {
-    let key_w = HELP.iter().map(|(k, _)| width(k)).max().unwrap_or(0);
-    let lines: Vec<Line> = HELP
+/// Full key reference for `screen`, centered over everything.
+pub fn render_help(frame: &mut Frame, screen: ScreenKind) {
+    let listed: Vec<_> = Group::ALL
+        .into_iter()
+        .flat_map(|g| commands(screen, g))
+        .collect();
+    let key_w = listed.iter().map(|c| width(c.keys)).max().unwrap_or(0);
+    let lines: Vec<Line> = listed
         .iter()
-        .map(|(k, d)| {
+        .map(|c| {
             Line::from(vec![
-                Span::styled(pad(k, key_w + 2), Style::new().add_modifier(Modifier::BOLD)),
-                Span::raw(*d),
+                Span::styled(
+                    pad(c.keys, key_w + 2),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(if c.note.is_empty() {
+                    c.label.to_owned()
+                } else {
+                    format!("{} ({})", c.label, c.note)
+                }),
             ])
         })
         .chain([
@@ -281,7 +389,8 @@ pub fn render_help(frame: &mut Frame) {
         .collect();
     let area = frame.area();
     let h = (lines.len() as u16 + 2).min(area.height);
-    let w = 72.min(area.width);
+    let content_w = lines.iter().map(Line::width).max().unwrap_or(0) + 2;
+    let w = u16::try_from(content_w).unwrap_or(u16::MAX).min(area.width);
     let popup = Rect {
         x: area.x + (area.width - w) / 2,
         y: area.y + (area.height - h) / 2,
@@ -318,7 +427,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::app::{Action, TextSession};
+    use crate::app::TextSession;
 
     fn app(left: &str, right: &str, w: u16, h: u16) -> App {
         let mut app = App::new(TextSession {
@@ -368,12 +477,94 @@ mod tests {
         insta::assert_snapshot!(screen(&a));
     }
 
+    /// Narrowest terminal that shows the sidebar next to a text diff.
+    const WIDE: u16 = MIN_TEXT_COLS + SIDEBAR_W;
+
+    #[test]
+    fn sidebar_screen() {
+        insta::assert_snapshot!(screen(&app(LEFT, RIGHT, 100, 24)));
+    }
+
+    #[test]
+    fn sidebar_docked_left_screen() {
+        let mut a = app(LEFT, RIGHT, 100, 24);
+        a.update(Action::ToggleSidebar);
+        a.update(Action::DockSidebar(Dock::Left));
+        insta::assert_snapshot!(screen(&a));
+    }
+
+    #[test]
+    fn tab_hides_sidebar_and_diff_takes_full_width() {
+        let mut a = app(LEFT, RIGHT, 100, 12);
+        a.update(Action::ToggleSidebar);
+        let s = screen(&a);
+        assert!(!s.contains("commands"), "{s}");
+        let header = s.lines().next().unwrap().trim_matches('"');
+        // Right label starts past the middle of the full 100 columns.
+        assert_eq!(header.find("right.txt"), Some(52), "{header}");
+    }
+
+    #[test]
+    fn sidebar_hides_when_terminal_is_too_narrow() {
+        assert!(!screen(&app(LEFT, RIGHT, WIDE - 1, 12)).contains("commands"));
+        let s = screen(&app(LEFT, RIGHT, WIDE, 12));
+        assert!(s.contains("commands"), "{s}");
+        let a = app(LEFT, RIGHT, WIDE - 1, 12);
+        assert!(a.sidebar.open, "hidden by size, not by the user");
+    }
+
+    #[test]
+    fn sidebar_shows_live_values_bold_when_on() {
+        let mut a = app(LEFT, RIGHT, 100, 24);
+        a.update(Action::CycleWhitespace);
+        a.update(Action::ToggleCase);
+        let t = draw(&a);
+        let buf = t.backend().buffer();
+        let text = t.backend().to_string();
+        let row_of = |needle: &str| {
+            u16::try_from(text.lines().position(|l| l.contains(needle)).unwrap()).unwrap()
+        };
+        // Values end one column before the right edge.
+        let last = |y: u16| &buf[(98, y)];
+        let ws = row_of("whitespace");
+        assert!(text.lines().nth(ws.into()).unwrap().contains("trailing"));
+        assert!(last(ws).modifier.contains(Modifier::BOLD), "on → bold");
+        let blank = row_of("ignore blank lines");
+        assert!(text.lines().nth(blank.into()).unwrap().contains("off"));
+        assert!(
+            !last(blank).modifier.contains(Modifier::BOLD),
+            "off → plain"
+        );
+        assert!(
+            text.lines()
+                .nth(row_of("ignore case").into())
+                .unwrap()
+                .contains(" on ")
+        );
+    }
+
+    #[test]
+    fn short_sidebar_ends_with_ellipsis() {
+        let s = screen(&app(LEFT, RIGHT, 100, 8));
+        let last_line = s.lines().last().unwrap();
+        assert!(last_line.contains("│ …"), "{s}");
+    }
+
+    #[test]
+    fn help_lists_only_this_screens_commands() {
+        let mut a = app(LEFT, RIGHT, 80, 30);
+        a.update(Action::ToggleHelp);
+        let s = screen(&a);
+        assert!(s.contains("Tab then ← / →"), "{s}");
+        assert!(!s.contains("open file diff"), "folder-only command: {s}");
+    }
+
     #[test]
     fn status_bar_truncates_left_half_first() {
         let s = screen(&app(LEFT, RIGHT, 50, 6));
         let status = s.lines().last().unwrap();
         assert!(
-            status.contains("-1 +1 ~1  2 changes  ?:help q:quit"),
+            status.contains("-1 +1 ~1  2 changes  tab:keys ?:help q:quit"),
             "{status}"
         );
     }
@@ -392,7 +583,7 @@ mod tests {
 
     #[test]
     fn tiny_terminal_does_not_panic() {
-        for (w, h) in [(1, 1), (5, 3), (12, 4)] {
+        for (w, h) in [(1, 1), (5, 3), (12, 4), (94, 1), (94, 2), (94, 3)] {
             let mut a = app(LEFT, RIGHT, w, h);
             screen(&a);
             a.update(Action::ToggleHelp);

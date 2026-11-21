@@ -1,7 +1,7 @@
 //! Interactive terminal viewer for `mydiff`.
 //!
 //! Architecture (Elm style, every piece pure except [`run_text`]):
-//! terminal event → [`keys::action_for`] → [`app::App::update`] → [`view::render`].
+//! terminal event → [`keys::KeyMap::action_for`] → [`app::App::update`] → [`view::render`].
 
 pub mod app;
 pub mod folder;
@@ -83,6 +83,7 @@ fn run(screen: &mut impl Screen) -> io::Result<()> {
     let mut terminal = ratatui::init();
     // Mouse capture enables the scroll wheel; hold Shift to select text in most terminals.
     let _ = execute!(io::stdout(), EnableMouseCapture);
+    let mut keymap = keys::KeyMap::default();
     let result = (|| -> io::Result<()> {
         loop {
             let size = terminal.size()?;
@@ -91,7 +92,7 @@ fn run(screen: &mut impl Screen) -> io::Result<()> {
                 height: size.height,
             });
             terminal.draw(|f| screen.draw(f))?;
-            if let Some(action) = keys::action_for(&event::read()?) {
+            if let Some(action) = keymap.action_for(&event::read()?) {
                 screen.update(action);
             }
             if screen.should_quit() {
