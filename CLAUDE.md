@@ -30,8 +30,10 @@ crates/mydiff-core/   pure engine: text in → result model out (no terminal I/O
 crates/mydiff-tui/    ratatui app, Elm style: keys.rs → app.rs update() → view.rs render()
   src/folder.rs, src/hex.rs   folder list and hex views
 crates/mydiff/        binary: args.rs (clap), settings.rs (config discovery), app.rs (dispatch),
+                      git.rs (git difftool / external diff adapters),
                       output/ (unified, side-by-side, json, summary, folder, hex, structured)
   tests/cmd/*.trycmd  CLI transcripts, run with tests/cmd/<name>.in/ as the working directory
+  tests/git.rs        end-to-end: real git runs mydiff via the `mydiff git setup` config
 ```
 
 ## Commands
@@ -57,6 +59,7 @@ Pick the **first** row that fits:
 | How two inputs compare (any mode) | `crates/mydiff-core/tests/fixtures/<mode>/<case>/` | `just new-case`, fill `left.*`/`right.*`, optional `options.toml`, `just snap` |
 | A pure function's edge cases | `#[cfg(test)] mod tests` in that module | `#[rstest]` + `#[case::name(...)]` table |
 | Something true for *all* inputs | `crates/mydiff-core/tests/properties.rs` | `proptest!` |
+| Behavior under real git (difftool, external diff) | `crates/mydiff/tests/git.rs` | Extend `Repo::new()`; assert or `insta::assert_snapshot!` on git's stdout |
 | CLI flags, exit codes, output formats, errors | `crates/mydiff/tests/cmd/<topic>.trycmd` (+ `<topic>.in/`) | Add a `$ mydiff …` block with `? <status>`, then `TRYCMD=overwrite` |
 | Renderer output (unified, side-by-side…) | Module tests in `crates/mydiff/src/output/` | `insta::assert_snapshot!(…, @"…")` inline |
 | TUI behavior (keys, scrolling, toggles) | `crates/mydiff-tui/src/{keys,app,folder,hex}.rs` tests | Call `update(Action::…)` and assert on state |
@@ -100,6 +103,8 @@ Fixture case layouts:
    modified (`~`), dim = ignored (`.`). Every colored thing also has a marker so
    output reads without color. Use only the basic 16 colors.
 6. **Exit codes.** 0 = identical, 1 = different, 2 = error (like `diff`).
+   Exception: `mydiff git external` exits 0 on differences, because git aborts on
+   any non-zero status from an external diff.
 7. Errors: `thiserror` (`mydiff_core::Error`) in libraries, `anyhow` in the binary.
    Validate options early (`DiffOptions::validate`) so bad input fails before files are read.
 
@@ -119,5 +124,8 @@ Fixture case layouts:
 - Name fixture case folders `snake_case` after the behavior (`whitespace_trailing`, `csv_keyed`).
 - Name test functions after the behavior, not the function (`ignored_lines_stay_patch_correct`).
 - Keep tests deterministic: no network, no clock, no dependence on `$HOME`
-  (CLI tests point `XDG_CONFIG_HOME` at a nonexistent dir).
+  (CLI tests point `XDG_CONFIG_HOME` at a nonexistent dir; git tests also isolate
+  `HOME`, `GIT_CONFIG_GLOBAL` and strip `GIT_*` variables).
+- trycmd normalizes `\` to `/` in output, so a transcript cannot show
+  backslashes faithfully. Test such output with a Rust test instead.
 - Do not commit or push unless asked.

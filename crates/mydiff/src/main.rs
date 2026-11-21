@@ -2,6 +2,7 @@
 
 mod app;
 mod args;
+mod git;
 mod output;
 mod settings;
 

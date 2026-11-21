@@ -64,7 +64,26 @@ Common options (see `mydiff --help` for all):
 | `--key-column NAME` | CSV: match rows by key |
 | `--ignore-path '$.meta.time'` | JSON/YAML: skip a path (`[*]` and `.*` wildcards) |
 | `--mode text\|dir\|binary\|json\|yaml\|csv` | override auto-detection |
+| `-L LABEL` (twice) | names to show for left and right, like `diff -L` |
 | `-P NAME`, `--config FILE`, `--no-config` | profiles and config files |
+
+## Using it from git
+
+```sh
+mydiff git setup >> ~/.gitconfig   # registers mydiff as git's difftool
+git difftool                       # each changed file in the viewer (q = next file)
+git difftool -d main               # every file changed since main, in the folder view
+GIT_EXTERNAL_DIFF='mydiff git external' git diff   # git diff, printed by mydiff
+```
+
+Files are labelled by repository path (`a/src/x.rs`, `b/src/x.rs`). Added and
+deleted files show against `/dev/null`. A JSON/YAML/CSV file that does not
+parse (half-edited, say) falls back to a line diff instead of failing.
+To make plain `git diff` always use mydiff, uncomment the `diff.external` lines
+at the end of the snippet (`git diff --no-ext-diff` bypasses it). In that mode
+mydiff exits 0 even when files differ, because git treats any other status as
+a crash. Comparison options go before the git arguments, for example
+`mydiff git external -w`.
 
 ## Config file
 

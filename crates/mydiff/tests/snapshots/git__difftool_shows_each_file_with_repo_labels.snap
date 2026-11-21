@@ -1,0 +1,39 @@
+---
+source: crates/mydiff/tests/git.rs
+expression: stdout(&out)
+---
+--- a/conf.yaml
++++ b/conf.yaml
+~ $.port: 80 → 8080
+--- a/data.json
++++ b/data.json
+@@ -1,1 +1,1 @@
+-{"ok": 1}
++{"ok": 
+--- a/f.txt
++++ b/f.txt
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++beta changed
+ gamma
+--- a/my notes.txt
++++ b/my notes.txt
+@@ -1,1 +1,1 @@
+-draft
++final
+--- /dev/null
++++ b/n.txt
+@@ -0,0 +1,1 @@
++new file
+--- a/old.json
++++ /dev/null
+@@ -1,1 +0,0 @@
+-{"gone": true}
+--- a/sub/s.txt
++++ b/sub/u.txt
+@@ -2,3 +2,4 @@
+ two
+ three
+ four
++five

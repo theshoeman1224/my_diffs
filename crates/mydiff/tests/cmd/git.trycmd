@@ -1,0 +1,42 @@
+# Git integration
+
+`-L` / `--label` names the inputs (like `diff -L`), first left, then right.
+
+```console
+$ mydiff -L old -L new a.txt b.txt
+? 1
+--- old
++++ new
+@@ -1,2 +1,2 @@
+ one
+-two
++2
+
+$ mydiff -L 1 -L 2 -L 3 a.txt b.txt
+? 2
+mydiff: error: --label can be given at most twice (left, then right)
+
+```
+
+`mydiff git setup` prints the git config to install. Its exact text is
+checked by `tests/git.rs`, which installs it and runs real git commands.
+
+`mydiff git external` is git's external diff driver. It labels files by
+repository path and exits 0 even when they differ, because git treats any
+other status as a crash.
+
+```console
+$ mydiff git external a.txt a.txt 1111111 100644 b.txt 2222222 100644
+diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1,2 +1,2 @@
+ one
+-two
++2
+
+$ mydiff git external a.txt a.txt 1 100644 b.txt 2 100644 b.txt
+? 2
+mydiff: error: expected the 7 or 9 arguments git passes to an external diff, got 8
+
+```
